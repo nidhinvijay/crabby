@@ -31,7 +31,7 @@ const projectOf = (cwd: string): string => {
 const yard = atom({ plugin: 'crabby', key: 'yard' } as const, { busy: false, doneAt: 0, crabs: [] } as Yard)
 
 // What the desktop pet also wants to know: plan usage, the tool in use, errors, "needs you".
-const extra = { usage: -1, resetsAt: '', busySince: 0, tool: '', toolAt: 0, errorAt: 0, needs: false, needsAt: 0 }
+const extra = { usage: -1, resetsAt: '', busySince: 0, tool: '', lastTool: '', toolAt: 0, errorAt: 0, needs: false, needsAt: 0 }
 
 async function writePet($: EngineInterface): Promise<void> {
   try {
@@ -48,6 +48,8 @@ async function writePet($: EngineInterface): Promise<void> {
       resetsAt: extra.resetsAt,
       busySince: extra.busySince,
       tool: extra.tool,
+      lastTool: extra.lastTool, // kept after the tool ends, with its start time, so the pet can still show a quick one
+      toolAt: extra.toolAt,
       errorAt: extra.errorAt,
       needs: extra.needs,
       needsAt: extra.needsAt,
@@ -99,6 +101,13 @@ export const register: Register = (on, options) => {
       void writePet($)
     })
     await writePet($)
+    // macOS: note which process this chat runs in, so its crab can find the chat's own window.
+    if (!(await $.env.get('USERPROFILE'))) {
+      try {
+        const file = `${await petDir($)}/pid-${sid.replace(/[^A-Za-z0-9_-]/g, '')}`
+        await $.process.run(['/bin/sh', '-c', 'echo $PPID > "$0"', file], { timeoutMs: 5000 })
+      } catch {}
+    }
     if (options.autoStart === true) {
       try {
         await startPet($)
@@ -168,6 +177,7 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     if (e.agentId) return next(e)
     extra.tool = e.tool
+    extra.lastTool = e.tool
     extra.toolAt = await $.clock.now()
     if (e.tool === 'AskUserQuestion') {
       extra.needs = true

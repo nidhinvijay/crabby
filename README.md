@@ -42,14 +42,16 @@ Then start a **new** Claude chat. The crab shows up by itself and goes away when
 
 ## What it does
 
+- **Climbs your windows (macOS).** Now and then it climbs the side of an app window that reaches the floor and strolls along the top; drop it on a window and it lands there. It likes the window its own chat runs in best and stays there longer. It rides along when the window moves, lets go when the window closes or gets covered, and may doze off up there. Turn it off with `"window_edges": false` in the pet folder's `settings.json`.
 - **Walks, hops and climbs.** It walks along the bottom of your screen (on top of the taskbar when the taskbar is showing), hops, and climbs the outer side walls. Drag it anywhere and let go: it falls, lands, and sticks to screen edges.
 - **One crab per chat.** With two or more chats open, hover a crab for a card with the project name, what that chat is doing, how long it has been working and your 5-hour usage.
 - **A helper crab per subagent**, one size smaller, in its own costume.
-- **Reacts to Claude's work:** thinking dots while Claude works, a magnifier while reading or searching, a hammer while editing, a terminal while running commands, hearts when a task finishes, a shake on errors, and a wave when Claude needs you.
+- **Reacts to Claude's work:** thinking dots while Claude works, a magnifier while reading or searching, a hammer while editing, a terminal while running commands, a globe for the web, a plug for connected (MCP) tools, a clipboard for the to-do list, a question card when Claude asks you something, hearts when a task finishes (confetti after a turn of ten minutes or more), a shake on errors, and a wave when Claude needs you.
 - **Moods:** tired as you pass 80% of your 5-hour limit, collapsed at 100%, and a happy hop when the limit resets.
 - **Sleeps in the corner.** When Claude goes quiet it wanders for a minute, then walks to the bottom-right corner and falls asleep. A chat that stays idle for a minute loses its crab (the newest chat always keeps one).
 - **Several monitors.** A crab left on a second screen walks back to your main screen after five minutes.
-- **Costumes:** Plain, Chef, Pirate, Dev, Student, Manager, Teacher, Wizard, Scientist, Ninja, Musician, Gardener and Viking, plus a Santa hat in December. It changes outfit now and then.
+- **Costumes:** Plain, Chef, Pirate, Dev, Student, Manager, Teacher, Wizard, Scientist, Ninja, Musician, Gardener and Viking, plus a Santa hat in December. It changes outfit now and then, until you pick one from the menu: that one stays on, also after a restart ("Surprise me" lets it change again). Size and speed are remembered too.
+- **Plays.** Now and then it trots after your pointer for a few seconds, or scuttles off when the pointer comes close (never when you point right at it). Two crabs that meet sometimes race to the end of the floor or window, or one hops over the other.
 - **Little extras:** a morning coffee cup, a stretch and yawn after an hour of non-stop work, crabs waving at each other, hold the mouse on a crab to pet it.
 - **Light:** under 50 MB of memory (about 33 MB measured on one PC), no network access, and it only reads and writes its own folder.
 
@@ -58,7 +60,11 @@ Then start a **new** Claude chat. The crab shows up by itself and goes away when
 | | |
 |---|---|
 | `/pet` | start or stop the pet |
-| right-click a crab | outfit, size, sleep, hide for an hour |
+| right-click a crab | outfit, size, speed, sleep, hide for an hour, and Options: how long tool props stay up, when a turn earns confetti, window climbing on or off, pointer play on or off (the crab holds still while its menu is open). Every choice is saved to `settings.json` in the pet folder and applies at once. |
+| `"prop_seconds"` in the pet folder's `settings.json` | how long the magnifier, hammer or terminal stays up at least (default `3`, `0` turns the hold off). Stop the pet before editing the file, then start it again. The `CRAB_PROP_SECONDS` environment variable overrides it. |
+| `"party_minutes"` in the same `settings.json` | how long a turn must be for confetti (default `10`, `0` turns it off) |
+| `"pointer_play": false` in the same `settings.json` | no chasing or running from the pointer |
+| `"speed"` in the same `settings.json` | how lively the crab is (default `1`; `0.5` walks half as fast, pauses twice as long, and hops, climbs and does tricks half as often; `0.1` to `3`). The right-click menu's "Change speed" sets it on the spot; to type your own number, stop the pet before editing the file, then start it again. The `CRAB_SPEED` environment variable overrides it. |
 
 ## How it works
 
