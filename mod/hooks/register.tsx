@@ -71,7 +71,8 @@ async function startPet($: EngineInterface): Promise<boolean> {
     .then(st => (st.kind === 'file' ? (async () => (await $.clock.now()) - st.mtimeMs)() : Promise.resolve(1e9)))
     .catch(() => Promise.resolve(1e9))
   if (age < 6000) return false
-  await $.process.run(['wscript.exe', dir.split('/').join(BS) + BS + 'start.vbs'], { timeoutMs: 15000 })
+  if (await $.env.get('USERPROFILE')) await $.process.run(['wscript.exe', dir.split('/').join(BS) + BS + 'start.vbs'], { timeoutMs: 15000 })
+  else await $.process.run(['/bin/sh', `${dir}/start.sh`], { timeoutMs: 15000 }) // macOS
   return true
 }
 
@@ -131,7 +132,7 @@ export const register: Register = (on, options) => {
     try {
       await startPet($)
     } catch {
-      return { text: 'Could not start the crab pet. You can double-click start.vbs in the crabby folder inside your .claude folder.' }
+      return { text: 'Could not start the crab pet. You can run start.vbs (Windows) or start.sh (macOS) in the crabby folder inside your .claude folder.' }
     }
     return { text: 'Crab pet started. Right-click it for a menu. Run /pet again to stop it.' }
   })

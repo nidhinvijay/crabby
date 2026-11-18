@@ -30,7 +30,8 @@ QUIT = os.path.join(BASE, 'quit')
 LOG = os.path.join(BASE, 'pet.log')
 DEBUG = bool(os.environ.get('CRAB_DEBUG'))
 SETTINGS = os.path.join(BASE, 'settings.json')
-KEY = '#fe00fe'            # this colour becomes see-through (and click-through)
+MAC = sys.platform == 'darwin'
+KEY = 'systemTransparent' if MAC else '#fe00fe'  # this colour becomes see-through (and click-through on Windows)
 BUSY_STALE_S = 20 * 60     # ignore "busy" from a session that went quiet this long ago
 BOTTOM_MARGIN = 0          # gap between the crab's feet and the bottom edge (0 = standing right on it; was 14)
 STICK_PX = 70              # let go this close to an edge and it sticks
@@ -53,6 +54,7 @@ NAMES = {'other': 'Plain', 'chef': 'Chef', 'pirate': 'Pirate', 'dev': 'Dev', 'st
 if time.localtime().tm_mon != 12 and 'santa' in OUTFITS:
     OUTFITS.remove('santa')  # the Santa hat is for December only
 CLAY = '#d97757'
+UI_FONT, SYM_FONT = ('Helvetica Neue', 'Apple Symbols') if MAC else ('Segoe UI', 'Segoe UI Symbol')
 
 SPR_W, SPR_H = 30, 26      # sprite size in sprite pixels
 PAD, TOP_PAD = 4, 30       # TOP_PAD: room beside the crab for the bubble, hearts and z's
@@ -123,7 +125,127 @@ class RECT(ctypes.Structure):
     _fields_ = [('left', ctypes.c_long), ('top', ctypes.c_long), ('right', ctypes.c_long), ('bottom', ctypes.c_long)]
 
 
+# ---- macOS: screens and window flags through the Objective-C runtime (no extra packages) ----
+if MAC:
+    import ctypes.util
+    _objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library('objc'))
+    ctypes.cdll.LoadLibrary(ctypes.util.find_library('AppKit'))
+    _objc.objc_getClass.restype = ctypes.c_void_p
+    _objc.objc_getClass.argtypes = [ctypes.c_char_p]
+    _objc.sel_registerName.restype = ctypes.c_void_p
+    _objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+    class CGRect(ctypes.Structure):
+        _fields_ = [('x', ctypes.c_double), ('y', ctypes.c_double), ('w', ctypes.c_double), ('h', ctypes.c_double)]
+
+    def _msg(obj, sel, *args, restype=ctypes.c_void_p, argtypes=()):
+        f = ctypes.cast(_objc.objc_msgSend, ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes))
+        return f(obj, _objc.sel_registerName(sel), *args)
+
+    def _nsapp():
+        return _msg(_objc.objc_getClass(b'NSApplication'), b'sharedApplication')
+
+    def mac_accessory():
+        """No Dock icon and no app menu: the crab is a background helper."""
+        _msg(_nsapp(), b'setActivationPolicy:', 1, argtypes=(ctypes.c_long,))
+
+    def mac_all_spaces():
+        """Show every crab window on all Spaces, also next to full-screen apps."""
+        wins = _msg(_nsapp(), b'windows')
+        for i in range(_msg(wins, b'count', restype=ctypes.c_ulong)):
+            nw = _msg(wins, b'objectAtIndex:', i, argtypes=(ctypes.c_ulong,))
+            _msg(nw, b'setCollectionBehavior:', 1 | 16 | 256, argtypes=(ctypes.c_ulong,))  # all spaces, stationary, full-screen aux
+            _msg(nw, b'setHasShadow:', False, argtypes=(ctypes.c_bool,))
+            _msg(nw, b'setLevel:', 25, argtypes=(ctypes.c_long,))  # status-bar level: above normal windows and Dock replacements
+            _msg(nw, b'setHidesOnDeactivate:', False, argtypes=(ctypes.c_bool,))
+
+    def mac_left_down():
+        """Is the left mouse button held right now (asked from the system, not from Tk's events)?"""
+        return bool(_msg(_objc.objc_getClass(b'NSEvent'), b'pressedMouseButtons', restype=ctypes.c_ulong) & 1)
+
+    def mac_screens():
+        """[(work, full, primary)] in Tk coordinates (origin top-left of the main screen, y down).
+        The work area leaves out the menu bar and the Dock, so the crab stands on top of the Dock."""
+        arr = _msg(_objc.objc_getClass(b'NSScreen'), b'screens')
+        raw = []
+        for i in range(_msg(arr, b'count', restype=ctypes.c_ulong)):
+            sc = _msg(arr, b'objectAtIndex:', i, argtypes=(ctypes.c_ulong,))
+            raw.append((_msg(sc, b'frame', restype=CGRect), _msg(sc, b'visibleFrame', restype=CGRect)))
+        if not raw:
+            return []
+        ph = raw[0][0].h  # Cocoa measures from the bottom of the main screen
+
+        def flip(r):
+            return (int(round(r.x)), int(round(ph - (r.y + r.h))), int(round(r.x + r.w)), int(round(ph - r.y)))
+        return [(flip(v), flip(f), i == 0) for i, (f, v) in enumerate(raw)]
+
+
+if MAC:
+    _V = ctypes.c_void_p
+    _cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library('CoreFoundation'))
+    _cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library('CoreGraphics'))
+    _cg.CGWindowListCopyWindowInfo.restype = _V
+    _cg.CGWindowListCopyWindowInfo.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    _cg.CGRectMakeWithDictionaryRepresentation.argtypes = [_V, ctypes.POINTER(CGRect)]
+    _cf.CFArrayGetCount.argtypes = [_V]
+    _cf.CFArrayGetCount.restype = ctypes.c_long
+    _cf.CFArrayGetValueAtIndex.argtypes = [_V, ctypes.c_long]
+    _cf.CFArrayGetValueAtIndex.restype = _V
+    _cf.CFDictionaryGetValue.argtypes = [_V, _V]
+    _cf.CFDictionaryGetValue.restype = _V
+    _cf.CFNumberGetValue.argtypes = [_V, ctypes.c_long, _V]
+    _cf.CFStringCreateWithCString.argtypes = [_V, ctypes.c_char_p, ctypes.c_uint32]
+    _cf.CFStringCreateWithCString.restype = _V
+    _cf.CFRelease.argtypes = [_V]
+    _K_BOUNDS = _cf.CFStringCreateWithCString(None, b'kCGWindowBounds', 0x08000100)
+    _K_LAYER = _cf.CFStringCreateWithCString(None, b'kCGWindowLayer', 0x08000100)
+    _K_PID = _cf.CFStringCreateWithCString(None, b'kCGWindowOwnerPID', 0x08000100)
+
+    def mac_bars():
+        """Bars that other apps pin to a screen edge above normal windows (uBar and other Dock replacements):
+        [(left, top, right, bottom)]. The real Dock is already left out of the work area by macOS."""
+        out, me = [], os.getpid()
+        arr = _cg.CGWindowListCopyWindowInfo(1, 0)  # on-screen windows only
+        if not arr:
+            return out
+        try:
+            for i in range(_cf.CFArrayGetCount(arr)):
+                d = _cf.CFArrayGetValueAtIndex(arr, i)
+                n = ctypes.c_int(0)
+                lv, pv, bv = _cf.CFDictionaryGetValue(d, _K_LAYER), _cf.CFDictionaryGetValue(d, _K_PID), _cf.CFDictionaryGetValue(d, _K_BOUNDS)
+                if not (lv and bv):
+                    continue
+                _cf.CFNumberGetValue(lv, 3, ctypes.byref(n))
+                if not 0 < n.value < 1000:  # normal windows are 0; the menu bar and system overlays sit far higher
+                    continue
+                if pv:
+                    pid = ctypes.c_int(0)
+                    _cf.CFNumberGetValue(pv, 3, ctypes.byref(pid))
+                    if pid.value == me:
+                        continue
+                r = CGRect()
+                if _cg.CGRectMakeWithDictionaryRepresentation(bv, ctypes.byref(r)):
+                    out.append((int(r.x), int(r.y), int(r.x + r.w), int(r.y + r.h)))
+        finally:
+            _cf.CFRelease(arr)
+        return out
+
+    def mac_apply_bars(mons):
+        """A wide, low bar along the bottom of a screen counts as the floor: the crab stands on top of it."""
+        for bl, bt, br, bb in mac_bars():
+            for m in mons:
+                l, t, r, b = m.full
+                if bl <= l + 4 and br >= r - 4 and abs(bb - b) <= 4 and 12 <= bb - bt <= (b - t) // 4 and (br - bl) >= (r - l) * 0.6:
+                    wl, wt, wr, wb = m.work
+                    m.work = (wl, wt, wr, min(wb, bt))
+
+
 def work_area():
+    if MAC:
+        try:
+            return mac_screens()[0][0]
+        except Exception:
+            return 0, 0, 1280, 720
     r = RECT()
     ok = ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(r), 0)  # SPI_GETWORKAREA
     if not ok or r.right <= r.left:
@@ -164,22 +286,32 @@ MON_CACHE = {}
 
 
 def get_monitors():
-    u = ctypes.windll.user32
     found = []
-    PROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(RECT), ctypes.c_void_p)
+    if MAC:
+        try:
+            found = [Mon(w, f, p) for w, f, p in mac_screens()]
+        except Exception:
+            found = []
+        try:
+            mac_all_spaces()  # Tk can drop the window level again; keep the crabs in front
+        except Exception:
+            pass
+    else:
+        u = ctypes.windll.user32
+        PROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(RECT), ctypes.c_void_p)
 
-    def cb(h, dc, rc, lp):
-        mi = MONITORINFO()
-        mi.cbSize = ctypes.sizeof(MONITORINFO)
-        if u.GetMonitorInfoW(h, ctypes.byref(mi)):
-            w, f = mi.rcWork, mi.rcMonitor
-            found.append(Mon((w.left, w.top, w.right, w.bottom), (f.left, f.top, f.right, f.bottom), bool(mi.dwFlags & 1)))
-        return 1
+        def cb(h, dc, rc, lp):
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if u.GetMonitorInfoW(h, ctypes.byref(mi)):
+                w, f = mi.rcWork, mi.rcMonitor
+                found.append(Mon((w.left, w.top, w.right, w.bottom), (f.left, f.top, f.right, f.bottom), bool(mi.dwFlags & 1)))
+            return 1
 
-    try:
-        u.EnumDisplayMonitors(None, None, PROC(cb), 0)
-    except Exception:
-        found = []
+        try:
+            u.EnumDisplayMonitors(None, None, PROC(cb), 0)
+        except Exception:
+            found = []
     if not found:
         a = work_area()
         found.append(Mon(a, a, True))
@@ -197,7 +329,7 @@ def get_monitors():
     found = same
     link_monitors(found)
     try:
-        apply_taskbars(found)
+        (mac_apply_bars if MAC else apply_taskbars)(found)
     except Exception:
         pass
     return found
@@ -274,6 +406,9 @@ def in_any(mons, cx, cy):
 
 def tool_window(win):
     """Hide it from the taskbar and Alt+Tab, and don't steal focus when clicked."""
+    if MAC:
+        mac_all_spaces()
+        return
     user32 = ctypes.windll.user32
     hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
     style = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
@@ -343,8 +478,11 @@ class Crab:
         self.win.overrideredirect(True)
         self.win.attributes('-topmost', True)
         self.win.configure(bg=KEY)
-        self.win.attributes('-transparentcolor', KEY)
-        self.cv = tk.Canvas(self.win, width=self.w, height=self.h, bg=KEY, highlightthickness=0, bd=0, cursor='hand2')
+        if MAC:
+            self.win.attributes('-transparent', True)
+        else:
+            self.win.attributes('-transparentcolor', KEY)
+        self.cv = tk.Canvas(self.win, width=self.w, height=self.h, bg=KEY, highlightthickness=0, bd=0, cursor='pointinghand' if MAC else 'hand2')
         self.cv.pack()
         left, top, right, bottom = bounds
         self.x = float(random.randint(left, max(left, right - self.w)))
@@ -399,6 +537,9 @@ class Crab:
         self.cv.bind('<ButtonRelease-1>', self.on_release)
         self.cv.bind('<Double-Button-1>', self.on_double)
         self.cv.bind('<Button-3>', self.on_menu)
+        if MAC:  # on a Mac the right button is button 2, and Control-click is a right click too
+            self.cv.bind('<Button-2>', self.on_menu)
+            self.cv.bind('<Control-ButtonPress-1>', self.on_menu)
         self.cv.bind('<Enter>', self.on_enter)
         self.cv.bind('<Leave>', lambda ev: self.hide_tip())
 
@@ -463,7 +604,7 @@ class Crab:
             t = tk.Toplevel(self.win)
             t.overrideredirect(True)
             t.attributes('-topmost', True)
-            tk.Label(t, text=self.card_text(), justify='left', bg='#2b2b2f', fg='#f4f3ee', font=('Segoe UI', 9), padx=8, pady=4).pack()
+            tk.Label(t, text=self.card_text(), justify='left', bg='#2b2b2f', fg='#f4f3ee', font=(UI_FONT, 9), padx=8, pady=4).pack()
             t.update_idletasks()
             tw, th = t.winfo_reqwidth(), t.winfo_reqheight()
             l, tp, r, b = self.bounds
@@ -472,9 +613,13 @@ class Crab:
             if y < tp:
                 y = int(self.y + self.h + 2)
             t.geometry('+%d+%d' % (x, y))
-            hwnd = ctypes.windll.user32.GetParent(t.winfo_id()) or t.winfo_id()
-            st_ = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, st_ | 0x80 | 0x08000000)  # TOOLWINDOW | NOACTIVATE
+            if MAC:
+                t.update_idletasks()
+                mac_all_spaces()
+            else:
+                hwnd = ctypes.windll.user32.GetParent(t.winfo_id()) or t.winfo_id()
+                st_ = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
+                ctypes.windll.user32.SetWindowLongW(hwnd, -20, st_ | 0x80 | 0x08000000)  # TOOLWINDOW | NOACTIVATE
             self.tip = t
         except Exception:
             self.tip = None
@@ -532,6 +677,8 @@ class Crab:
     # ---- mouse: drag, drop, stick ----
     def on_press(self, ev):
         self.hide_tip()
+        if DEBUG:
+            log('press %s at %d,%d' % (self.sid[:6], ev.x_root, ev.y_root))
         self.idle_since = time.time()
         self.press_t, self.press_xy, self.moved, self.petting = time.time(), (ev.x_root, ev.y_root), False, False
         self.wall_until, self.climb = None, None
@@ -554,9 +701,27 @@ class Crab:
         self.pos_shown = (int(self.x), int(self.y))
         self.win.geometry('+%d+%d' % (int(self.x), int(self.y)))
 
-    def on_release(self, ev):
+    def mac_drag_poll(self):
+        """macOS stops sending motion events when a fast pointer leaves the small window, which dropped the crab.
+        While dragging, follow the real pointer and watch the real button instead."""
+        class E:
+            pass
+        e = E()
+        e.x_root, e.y_root = self.win.winfo_pointerxy()
+        if mac_left_down():
+            self.on_motion(e)
+        else:
+            self.on_release(e, real=True)
+
+    def on_release(self, ev, real=False):
         if self.mode != 'drag':
             return
+        if MAC and not real:
+            # Tk reports a release when a fast pointer outruns the window; trust only the real button (mac_drag_poll)
+            if DEBUG:
+                log('tk release ignored=%s' % mac_left_down())
+            if mac_left_down():
+                return
         if not self.moved:  # just a click or a pet, not a drag: stay where it is
             self.petting = False
             if self.y < self.floor_y() - 2:
@@ -1048,13 +1213,13 @@ class Crab:
                     cv.create_rectangle(sx - 4, sy - 1, sx + 4, sy + 1, fill=col, outline='')
         elif calling:  # "I need you": jumping and waving, with a gold question mark
             x0, y0 = pt(-14, 8)
-            cv.create_text(x0, y0, text='?', fill='#e8a317', font=('Segoe UI', 14, 'bold'))
+            cv.create_text(x0, y0, text='?', fill='#e8a317', font=(UI_FONT, 14, 'bold'))
         elif shaking:  # a turn failed
             x0, y0 = pt(0, 10)
-            cv.create_text(x0, y0, text='!', fill='#e5484d', font=('Segoe UI', 16, 'bold'))
+            cv.create_text(x0, y0, text='!', fill='#e5484d', font=(UI_FONT, 16, 'bold'))
         elif pose == 'greet':  # two crabs meet
             x0, y0 = pt(0, 10)
-            cv.create_text(x0, y0, text='♥', fill='#ff6f8d', font=('Segoe UI Symbol', 12, 'bold'))
+            cv.create_text(x0, y0, text='♥', fill='#ff6f8d', font=(SYM_FONT, 12, 'bold'))
         elif pose == 'break':  # a long stretch of work: time for a coffee break
             x0, y0 = pt(0, 12)
             cv.create_rectangle(x0 - 8, y0 - 4, x0 + 6, y0 + 8, fill='#f4f3ee', outline='')  # a little coffee cup
@@ -1065,18 +1230,18 @@ class Crab:
         elif pose == 'joy':  # the usage limit reset
             for i, off in enumerate((-14, 0, 14)):
                 x0, y0 = pt(off, 6 + ((now * 18 + i * 7) % 18))
-                cv.create_text(x0, y0, text='✦', fill='#ffd45e', font=('Segoe UI Symbol', 11, 'bold'))
+                cv.create_text(x0, y0, text='✦', fill='#ffd45e', font=(SYM_FONT, 11, 'bold'))
         elif main and (hearts or petting) and self.surf == 'floor':
             for i, off in enumerate((-16, 0, 16)):
                 up = 4 + ((now * 14 + i * 9) % 26)
                 x0, y0 = pt(off, up)
-                cv.create_text(x0, y0, text='♥', fill='#ff6f8d', font=('Segoe UI Symbol', 11, 'bold'))
+                cv.create_text(x0, y0, text='♥', fill='#ff6f8d', font=(SYM_FONT, 11, 'bold'))
         elif main and self.asleep:
             t = 2 if self.deep else int(now * 1.5) % 3
             for i in range(3):
                 if i <= t:
                     x0, y0 = pt(14 + i * 7, 2 + i * 8)
-                    cv.create_text(x0, y0, text='z' if i == 0 else 'Z', fill='#8aa0d0', font=('Segoe UI', 8 + i * 3, 'bold'))
+                    cv.create_text(x0, y0, text='z' if i == 0 else 'Z', fill='#8aa0d0', font=(UI_FONT, 8 + i * 3, 'bold'))
         elif main and working and self.mode != 'drag' and mood != 'dead':
             on = int(now * 3) % 3
             dots = [pt((i - 1) * 8, 10) for i in range(3)]  # just the three dots, no bubble, on every surface
@@ -1177,6 +1342,11 @@ def main():
         pass
     root = tk.Tk()
     root.withdraw()
+    if MAC:
+        try:
+            mac_accessory()
+        except Exception:
+            log('mac_accessory failed: ' + traceback.format_exc())
     crabs = {}   # ('m', sid) for a session's main crab, ('a', sid, agent) for its helpers
     st = {'last': time.time(), 'state_t': 0.0, 'beat_t': 0.0, 's': {'sessions': [], 'usage': -1.0},
           'err_seen': {}, 'rescale': False, 'mon_t': 0.0, 'hide_until': 0.0, 'greet_t': 0.0, 'slots': {}, 'dbg_t': 0.0, 'n': 0}
@@ -1367,6 +1537,13 @@ def main():
                 st['s'] = read_state()
                 reconcile(get_monitors(), now)
             live_list = list(crabs.values())
+            if MAC:
+                for c in live_list:
+                    if c.mode == 'drag':
+                        try:
+                            c.mac_drag_poll()
+                        except Exception:
+                            log(traceback.format_exc())
             if len(live_list) > 1 and now - st['greet_t'] > 0.25:
                 st['greet_t'] = now
                 greet_pairs(live_list, now)  # two crabs meet: they wave at each other
