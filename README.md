@@ -46,6 +46,7 @@ Then start a **new** Claude chat. The crab shows up by itself and goes away when
 - **Walks, hops and climbs.** It walks along the bottom of your screen (on top of the taskbar when the taskbar is showing), hops, and climbs the outer side walls. Drag it anywhere and let go: it falls, lands, and sticks to screen edges.
 - **One crab per chat.** With two or more chats open, hover a crab for a card with the project name, what that chat is doing, how long it has been working and your 5-hour usage.
 - **A helper crab per subagent**, one size smaller, in its own costume.
+- **Arrives and leaves in a puff of smoke.** A new chat's crab steps out of the same puff and sparkles as an outfit change, and a closed chat's crab vanishes into one. Helper crabs do the same when a subagent starts and finishes.
 - **Reacts to Claude's work:** thinking dots while Claude works, a magnifier while reading or searching, a hammer while editing, a terminal while running commands, a globe for the web, a plug for connected (MCP) tools, a clipboard for the to-do list, a question card when Claude asks you something, hearts when a task finishes (confetti after a turn of ten minutes or more), a shake on errors, and a wave when Claude needs you.
 - **Moods:** tired as you pass 80% of your 5-hour limit, collapsed at 100%, and a happy hop when the limit resets.
 - **Sleeps in the corner.** When Claude goes quiet it wanders for a minute, then walks to the bottom-right corner and falls asleep. A chat that stays idle for a minute loses its crab (the newest chat always keeps one).
@@ -53,6 +54,7 @@ Then start a **new** Claude chat. The crab shows up by itself and goes away when
 - **Costumes:** Plain, Chef, Pirate, Dev, Student, Manager, Teacher, Wizard, Scientist, Ninja, Musician, Gardener and Viking, plus a Santa hat in December. It changes outfit now and then, until you pick one from the menu: that one stays on, also after a restart ("Surprise me" lets it change again). Size and speed are remembered too.
 - **Plays.** Now and then it trots after your pointer for a few seconds, or scuttles off when the pointer comes close (never when you point right at it). Two crabs that meet sometimes race to the end of the floor or window, or one hops over the other.
 - **Little extras:** a morning coffee cup, a stretch and yawn after an hour of non-stop work, crabs waving at each other, hold the mouse on a crab to pet it.
+- **Never steals focus (macOS).** A crab or hover card that appears while you're typing leaves the keyboard where it was. Clicking or right-clicking a crab still works as usual.
 - **Light:** under 50 MB of memory (about 33 MB measured on one PC), no network access, and it only reads and writes its own folder.
 
 ## Controls
