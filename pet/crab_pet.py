@@ -195,6 +195,34 @@ if MAC:
     def mac_accessory():
         """No Dock icon and no app menu: the crab is a background helper."""
         _msg(_nsapp(), b'setActivationPolicy:', 1, argtypes=(ctypes.c_long,))
+        mac_no_focus_steal()
+
+    _ACT = {}  # keeps the ctypes callbacks and the original method alive
+
+    def mac_no_focus_steal():
+        """Tk calls [NSApp activateIgnoringOtherApps:] every time it shows a window, so a new crab (or a
+        hover bubble) pulled keyboard focus away from whatever you were typing in. Let activation through
+        only while a mouse button is held: a click or right-click menu on a crab still works, a crab that
+        just appears no longer takes focus."""
+        if _ACT:
+            return
+        _objc.class_getInstanceMethod.restype = ctypes.c_void_p
+        _objc.class_getInstanceMethod.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        _objc.method_setImplementation.restype = ctypes.c_void_p
+        _objc.method_setImplementation.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        proto = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool)
+        meth = _objc.class_getInstanceMethod(_objc.objc_getClass(b'NSApplication'), _objc.sel_registerName(b'activateIgnoringOtherApps:'))
+        if not meth:
+            return
+
+        def activate(self_, cmd, flag):
+            try:
+                if _msg(_objc.objc_getClass(b'NSEvent'), b'pressedMouseButtons', restype=ctypes.c_ulong):
+                    _ACT['orig'](self_, cmd, flag)
+            except Exception:
+                pass
+        _ACT['new'] = proto(activate)
+        _ACT['orig'] = proto(_objc.method_setImplementation(meth, ctypes.cast(_ACT['new'], ctypes.c_void_p)))
 
     def mac_all_spaces():
         """Show every crab window on all Spaces, also next to full-screen apps."""
@@ -718,6 +746,8 @@ class Crab:
             if remembered or slot:
                 self.x, self.y = hx, float(self.floor_y())
         self.fx_t0, self.fx_swapped, self.fx_new = None, False, 'other'
+        self.vanishing = False  # its chat closed: the outfit-change puff plays and the crab is gone with it
+        self.appearing = False  # a new chat: the crab steps out of the same puff
         self.drag_off = (0, 0)
         self.win.geometry('%dx%d+%d+%d' % (self.w, self.h, int(self.x), int(self.y)))
         self.win.update_idletasks()
@@ -1220,6 +1250,32 @@ class Crab:
         self.fx_new = want if want in OUTFITS else random.choice(choices)
         self.fx_t0, self.fx_swapped = now, False
 
+    # ---- leaving: its chat closed ----
+    VANISH_S = 1.1  # as long as the outfit change: puff, sparkles, done
+
+    def vanish(self, now):
+        """Start the same puff as an outfit change, but the crab does not come back out of it."""
+        self.hide_tip()
+        self.vanishing = True
+        self.fx_t0, self.fx_swapped = now, True
+        self.mode, self.tool, self.needs, self.pose, self.trick, self.petting = 'pause', '', False, None, None, False
+        self.ox = self.oy = 0
+        self.shown = None
+
+    def appear(self, now):
+        """A new chat: the same puff as an outfit change, with the crab only showing as it clears."""
+        self.appearing = True
+        self.fx_t0, self.fx_swapped = now, True
+        self.mode, self.pause_until = 'pause', now + self.VANISH_S
+        self.shown = None
+
+    def vanish_tick(self, now):
+        """One frame of the puff; True once it has played out and the window can go."""
+        if self.fx_t0 is None or now - self.fx_t0 >= self.VANISH_S:
+            return True
+        self.draw(now, False, False, False, 'ok', False, False)
+        return False
+
     # ---- behaviour ----
     def pick_target(self):
         left, top, right, bottom = self.bounds
@@ -1304,7 +1360,7 @@ class Crab:
                     PREFS['outfit'] = self.tier
                     save_prefs()
             if t >= 1.1:
-                self.fx_t0 = None
+                self.fx_t0, self.appearing = None, False
                 self.next_outfit = now + random.uniform(*OUTFIT_EVERY)
 
         if main:  # any activity resets the idle clock (a sleeping or collapsed crab only wakes for the mouse)
@@ -1592,7 +1648,7 @@ class Crab:
         fr = tick if tick >= 0 else 0
         claws_up = pose in ('break', 'joy')
         waving = (trick == 'wave') or calling or pose == 'greet' or claws_up
-        show_crab = fx_t is None or fx_t < 0.2 or fx_t > 0.5
+        show_crab = fx_t is None or (fx_t < 0.2 and not self.appearing) or (fx_t > 0.5 and not self.vanishing)
         bob = 1 if walking and self.phase == 1 else 0
         if show_crab:
             for x, y, w, h, col, cls in SPRITES[self.tier]:
@@ -1881,6 +1937,7 @@ def main():
         except Exception:
             log('mac_accessory failed: ' + traceback.format_exc())
     crabs = {}   # ('m', sid) for a session's main crab, ('a', sid, agent) for its helpers
+    leaving = []  # crabs whose chat closed, still playing their vanishing puff
     st = {'last': time.time(), 'state_t': 0.0, 'beat_t': 0.0, 's': {'sessions': [], 'usage': -1.0},
           'err_seen': {}, 'rescale': False, 'mon_t': 0.0, 'hide_until': 0.0, 'greet_t': 0.0, 'slots': {}, 'dbg_t': 0.0, 'n': 0}
 
@@ -1957,6 +2014,9 @@ def main():
 
     def hide_for_hour():
         st['hide_until'] = time.time() + 3600
+        for c in leaving:  # tick() pauses while hidden, so a puff in progress would hang there
+            c.destroy()
+        leaving.clear()
         for c in crabs.values():
             c.hide_tip()
             try:
@@ -2006,15 +2066,20 @@ def main():
         for key in list(crabs):
             c = crabs[key]
             if c.sid not in live or (key[0] == 'a' and key[2] not in live[c.sid]['agents']):
-                c.destroy()
                 del crabs[key]
+                if st['hide_until'] or c.mode == 'drag':
+                    c.destroy()
+                else:
+                    c.vanish(now)  # a puff of smoke, then gone (tick() destroys it when the puff ends)
+                    leaving.append(c)
         for x in sess:
             sid = x['sid']
             if ('m', sid) not in crabs:
-                make_main(sid, slots[sid], mons2)
+                make_main(sid, slots[sid], mons2).appear(now)  # steps out of a puff of smoke
             for aid, tier in x['agents'].items():
                 if ('a', sid, aid) not in crabs and len(crabs) < 16:
                     crabs[('a', sid, aid)] = Crab(root, aid, tier, False, mons2, sid=sid)
+                    crabs[('a', sid, aid)].appear(now)
         multi = len(sess) >= 2
         seen, labels = {}, {}
         for x in sorted(sess, key=lambda v: slots[v['sid']]):
@@ -2057,8 +2122,9 @@ def main():
     def rebuild():
         """Size changed: make every crab again at the new size."""
         saved = [(c.sid, c.slot, c.tier, c.x, c.y, c.w, c.h) for c in mains()]
-        for c in crabs.values():
+        for c in list(crabs.values()) + leaving:
             c.destroy()
+        leaving.clear()
         crabs.clear()
         mons2 = get_monitors()
         for sid, slot, tier, x, y, w, h in saved:
@@ -2144,6 +2210,17 @@ def main():
                 any_working = any_working or (working and c.main)
                 any_hearts = any_hearts or hearts
                 if c.update(dt, now, working, hearts):
+                    fast = True
+            for c in list(leaving):
+                try:
+                    done = c.vanish_tick(now)
+                except Exception:
+                    log(traceback.format_exc())
+                    done = True
+                if done:
+                    c.destroy()
+                    leaving.remove(c)
+                else:
                     fast = True
             ms = [c for c in live_list if c.main]
             if DEBUG and now - st['dbg_t'] > 2:
