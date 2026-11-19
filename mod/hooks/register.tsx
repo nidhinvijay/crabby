@@ -31,7 +31,7 @@ const projectOf = (cwd: string): string => {
 const yard = atom({ plugin: 'crabby', key: 'yard' } as const, { busy: false, doneAt: 0, crabs: [] } as Yard)
 
 // What the desktop pet also wants to know: plan usage, the tool in use, errors, "needs you".
-const extra = { usage: -1, resetsAt: '', busySince: 0, tool: '', toolAt: 0, errorAt: 0, needs: false, needsAt: 0 }
+const extra = { usage: -1, resetsAt: '', busySince: 0, tool: '', lastTool: '', toolAt: 0, errorAt: 0, needs: false, needsAt: 0 }
 
 async function writePet($: EngineInterface): Promise<void> {
   try {
@@ -48,6 +48,8 @@ async function writePet($: EngineInterface): Promise<void> {
       resetsAt: extra.resetsAt,
       busySince: extra.busySince,
       tool: extra.tool,
+      lastTool: extra.lastTool, // kept after the tool ends, with its start time, so the pet can still show a quick one
+      toolAt: extra.toolAt,
       errorAt: extra.errorAt,
       needs: extra.needs,
       needsAt: extra.needsAt,
@@ -71,7 +73,8 @@ async function startPet($: EngineInterface): Promise<boolean> {
     .then(st => (st.kind === 'file' ? (async () => (await $.clock.now()) - st.mtimeMs)() : Promise.resolve(1e9)))
     .catch(() => Promise.resolve(1e9))
   if (age < 6000) return false
-  await $.process.run(['wscript.exe', dir.split('/').join(BS) + BS + 'start.vbs'], { timeoutMs: 15000 })
+  if (await $.env.get('USERPROFILE')) await $.process.run(['wscript.exe', dir.split('/').join(BS) + BS + 'start.vbs'], { timeoutMs: 15000 })
+  else await $.process.run(['/bin/sh', `${dir}/start.sh`], { timeoutMs: 15000 }) // macOS
   return true
 }
 
@@ -98,6 +101,13 @@ export const register: Register = (on, options) => {
       void writePet($)
     })
     await writePet($)
+    // macOS: note which process this chat runs in, so its crab can find the chat's own window.
+    if (!(await $.env.get('USERPROFILE'))) {
+      try {
+        const file = `${await petDir($)}/pid-${sid.replace(/[^A-Za-z0-9_-]/g, '')}`
+        await $.process.run(['/bin/sh', '-c', 'echo $PPID > "$0"', file], { timeoutMs: 5000 })
+      } catch {}
+    }
     if (options.autoStart === true) {
       try {
         await startPet($)
@@ -131,7 +141,7 @@ export const register: Register = (on, options) => {
     try {
       await startPet($)
     } catch {
-      return { text: 'Could not start the crab pet. You can double-click start.vbs in the crabby folder inside your .claude folder.' }
+      return { text: 'Could not start the crab pet. You can run start.vbs (Windows) or start.sh (macOS) in the crabby folder inside your .claude folder.' }
     }
     return { text: 'Crab pet started. Right-click it for a menu. Run /pet again to stop it.' }
   })
@@ -167,6 +177,7 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     if (e.agentId) return next(e)
     extra.tool = e.tool
+    extra.lastTool = e.tool
     extra.toolAt = await $.clock.now()
     if (e.tool === 'AskUserQuestion') {
       extra.needs = true

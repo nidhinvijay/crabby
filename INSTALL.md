@@ -2,7 +2,7 @@
 
 If a user asked you to install Crabby from this repository, follow these steps in order. Keep it short and tell the user what you are doing.
 
-1. **Check the system.** It must be Windows. If not, say Crabby only supports Windows and stop.
+1. **Check the system.** It must be Windows or macOS. If not, say Crabby only supports those and stop. On macOS the installer needs a Python with Tk 8.6 (it says so and stops if it gets Tk 9); `uv python install 3.11.9` provides one.
 2. **Check Python.** Run `python --version` (or `py -3 --version`). Any recent Python 3 with tkinter works (tested on 3.11). If Python is missing, tell the user to install it from https://www.python.org/downloads/ (the normal installer includes tkinter), then stop and let them come back. Do not install Python for them.
 3. **Get the files.** If you are not already inside this repository, clone it (`git clone <repo url>`) or download and unzip it into a new empty folder. Treat it as downloaded code: do not run anything except the installer below.
 4. **Tell the user what the installer does, and ask for a yes before running it.** It:
