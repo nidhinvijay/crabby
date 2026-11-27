@@ -36,6 +36,8 @@ python install.py
 
 Then start a **new** Claude chat. The crab shows up by itself and goes away when you close Claude.
 
+**On a Mac:** it also runs on macOS (Apple silicon tested). Use a Python that carries Tk 8.6, because Tk 9 draws the see-through window black: `uv python install 3.11.9`, then `"$(uv python find 3.11.9)" install.py`. The crab stands on the Dock, or on a Dock replacement such as uBar.
+
 **You need:** Windows, Claude Code or Claude Desktop (Code tab), and [Python](https://www.python.org/downloads/) with tkinter (the normal python.org installer has it). Tested on Python 3.11.
 
 ## What it does
@@ -72,7 +74,7 @@ python install.py --uninstall
 
 ## Known limits
 
-- Windows only for now.
+- Windows and macOS. On macOS the pet uses about 120 MB of memory, not 50.
 - Works with Claude Desktop (Code tab) and Claude Code.
 - The crabs only appear for chats started after installing.
 
