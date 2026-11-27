@@ -55,33 +55,45 @@ def backup(path):
     return None
 
 
+MAC = sys.platform == 'darwin'
+SEP = ':' if MAC else ';'   # CLAUDE_CODE_PLUGIN_DIRS is a PATH-style list
+
+
 def dirs_of(env):
-    return [d for d in (env.get('CLAUDE_CODE_PLUGIN_DIRS') or '').split(';') if d.strip()]
+    return [d for d in (env.get('CLAUDE_CODE_PLUGIN_DIRS') or '').split(SEP) if d.strip()]
 
 
 def same(a, b):
+    a, b = os.path.expanduser(a), os.path.expanduser(b)
     return os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b))
 
 
 def install(args):
-    if sys.platform != 'win32':
-        sys.exit('Crabby only runs on Windows for now.')
+    if sys.platform != 'win32' and not MAC:
+        sys.exit('Crabby only runs on Windows and macOS for now.')
     try:
-        import tkinter  # noqa: F401
+        import tkinter
     except Exception:
         sys.exit('This Python has no tkinter. Install Python from python.org (the normal installer includes tkinter) and run this again.')
+    if MAC and tkinter.TkVersion >= 9:
+        sys.exit('This Python carries Tk %s, which draws see-through windows black on macOS. Run the installer with a Python '
+                 'that carries Tk 8.6, for example:  uv python install 3.11.9  then  "$(uv python find 3.11.9)" install.py' % tkinter.TkVersion)
 
     base = claude_dir(args.claude_dir)
     pet_dir = os.path.join(base, NAME)
     mod_dir = os.path.join(base, 'mods', NAME)
     os.makedirs(pet_dir, exist_ok=True)
 
-    for f in ('crab_pet.py', 'sprites.json', 'start.vbs'):
+    for f in ('crab_pet.py', 'sprites.json', 'start.sh' if MAC else 'start.vbs'):
         shutil.copy2(os.path.join(HERE, 'pet', f), os.path.join(pet_dir, f))
 
-    pyw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
-    with open(os.path.join(pet_dir, 'pythonw.txt'), 'w', encoding='utf-8') as fh:
-        fh.write((pyw if os.path.exists(pyw) else '') + '\n')
+    if MAC:
+        with open(os.path.join(pet_dir, 'python.txt'), 'w', encoding='utf-8') as fh:
+            fh.write(sys.executable + '\n')
+    else:
+        pyw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+        with open(os.path.join(pet_dir, 'pythonw.txt'), 'w', encoding='utf-8') as fh:
+            fh.write((pyw if os.path.exists(pyw) else '') + '\n')
 
     if os.path.isdir(mod_dir):
         shutil.rmtree(mod_dir)
@@ -94,7 +106,7 @@ def install(args):
     dirs = dirs_of(env)
     if not any(same(d, mod_dir) for d in dirs):
         dirs.append(fwd(mod_dir))
-    env['CLAUDE_CODE_PLUGIN_DIRS'] = ';'.join(dirs)
+    env['CLAUDE_CODE_PLUGIN_DIRS'] = SEP.join(dirs)
     opts = data.setdefault('pluginConfigs', {}).setdefault(NAME, {}).setdefault('options', {})
     opts['autoStart'] = not args.no_autostart
     save_settings(settings_path, data)
@@ -126,7 +138,7 @@ def uninstall(args):
         if isinstance(env, dict) and 'CLAUDE_CODE_PLUGIN_DIRS' in env:
             keep = [d for d in dirs_of(env) if not same(d, mod_dir)]
             if keep:
-                env['CLAUDE_CODE_PLUGIN_DIRS'] = ';'.join(keep)
+                env['CLAUDE_CODE_PLUGIN_DIRS'] = SEP.join(keep)
             else:
                 del env['CLAUDE_CODE_PLUGIN_DIRS']
             if not env:

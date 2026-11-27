@@ -18,6 +18,7 @@ import json
 import math
 import os
 import random
+import subprocess
 import sys
 import time
 import traceback
@@ -30,7 +31,8 @@ QUIT = os.path.join(BASE, 'quit')
 LOG = os.path.join(BASE, 'pet.log')
 DEBUG = bool(os.environ.get('CRAB_DEBUG'))
 SETTINGS = os.path.join(BASE, 'settings.json')
-KEY = '#fe00fe'            # this colour becomes see-through (and click-through)
+MAC = sys.platform == 'darwin'
+KEY = 'systemTransparent' if MAC else '#fe00fe'  # this colour becomes see-through (and click-through on Windows)
 BUSY_STALE_S = 20 * 60     # ignore "busy" from a session that went quiet this long ago
 BOTTOM_MARGIN = 0          # gap between the crab's feet and the bottom edge (0 = standing right on it; was 14)
 STICK_PX = 70              # let go this close to an edge and it sticks
@@ -46,13 +48,24 @@ MIGRATE_AFTER = (300, 300)  # seconds on a secondary screen before the crab walk
 WANDER_IDLE_S = 60         # after Claude goes quiet the crab wanders this long, then walks to its bed in the bottom-right corner
 AWAKE_FOR = 90           # seconds it stays awake (tricks) after it gets home, then it dozes
 TRICK_DUR = {'blink': 0.25, 'wave': 1.6, 'hop': 0.6, 'yawn': 1.3}
-TOOL_PROP = {'Read': 'lens', 'Grep': 'lens', 'Glob': 'lens', 'WebSearch': 'lens', 'WebFetch': 'lens', 'ToolSearch': 'lens',
+TOOL_PROP = {'Read': 'lens', 'Grep': 'lens', 'Glob': 'lens', 'ToolSearch': 'lens', 'WebSearch': 'globe', 'WebFetch': 'globe',
              'Edit': 'hammer', 'Write': 'hammer', 'NotebookEdit': 'hammer', 'MultiEdit': 'hammer',
-             'Bash': 'term', 'PowerShell': 'term'}
+             'Bash': 'term', 'PowerShell': 'term',
+             'TodoWrite': 'clip', 'TaskCreate': 'clip', 'TaskUpdate': 'clip', 'TaskList': 'clip', 'TaskGet': 'clip'}
+PROP_SAYS = {'lens': 'Looking through files', 'hammer': 'Editing files', 'term': 'Running commands', 'globe': 'Looking on the web',
+             'plug': 'Using a connected tool', 'clip': 'Updating the to-do list'}
+
+
+def prop_for(tool):
+    """The prop for a tool: by name, and a plug for any tool that comes from a connected (MCP) server."""
+    if not tool:
+        return None
+    return TOOL_PROP.get(tool) or ('plug' if tool.startswith('mcp__') else None)
 NAMES = {'other': 'Plain', 'chef': 'Chef', 'pirate': 'Pirate', 'dev': 'Dev', 'student': 'Student', 'manager': 'Manager', 'teacher': 'Teacher', 'wizard': 'Wizard', 'scientist': 'Scientist', 'ninja': 'Ninja', 'musician': 'Musician', 'gardener': 'Gardener', 'viking': 'Viking', 'santa': 'Santa hat'}
 if time.localtime().tm_mon != 12 and 'santa' in OUTFITS:
     OUTFITS.remove('santa')  # the Santa hat is for December only
 CLAY = '#d97757'
+UI_FONT, SYM_FONT = ('Helvetica Neue', 'Apple Symbols') if MAC else ('Segoe UI', 'Segoe UI Symbol')
 
 SPR_W, SPR_H = 30, 26      # sprite size in sprite pixels
 PAD, TOP_PAD = 4, 30       # TOP_PAD: room beside the crab for the bubble, hearts and z's
@@ -68,6 +81,42 @@ def load_prefs():
 
 
 PREFS = load_prefs()
+
+
+def _prop_hold():
+    """Seconds a tool prop (magnifier, hammer, terminal) stays up at least. "prop_seconds" in settings.json, or CRAB_PROP_SECONDS."""
+    try:
+        return max(0.0, float(os.environ.get('CRAB_PROP_SECONDS') or PREFS.get('prop_seconds', 3)))
+    except Exception:
+        return 3.0
+
+
+PROP_HOLD = _prop_hold()
+
+
+def _speed():
+    """How lively the crab is: 1 is normal, 0.5 walks half as fast and pauses twice as long. "speed" in settings.json, or CRAB_SPEED."""
+    try:
+        return min(3.0, max(0.1, float(os.environ.get('CRAB_SPEED') or PREFS.get('speed', 1))))
+    except Exception:
+        return 1.0
+
+
+SPEED = _speed()
+SPEEDS = ((0.2, 'Very slow'), (0.33, 'Slow'), (0.5, 'Relaxed'), (1.0, 'Normal'), (1.5, 'Fast'), (2.5, 'Hyper'))  # the menu's choices
+POINTER_PLAY = PREFS.get('pointer_play', True) is not False  # now and then it follows the pointer, or runs from it
+
+
+def _party_s():
+    """A turn at least this long ends with confetti instead of hearts. "party_minutes" in settings.json, or CRAB_PARTY_MINUTES."""
+    try:
+        return max(0.0, float(os.environ.get('CRAB_PARTY_MINUTES') or PREFS.get('party_minutes', 10))) * 60
+    except Exception:
+        return 600.0
+
+
+PARTY_S = _party_s()
+WIN_EDGES = PREFS.get('window_edges', True) is not False and not os.environ.get('CRAB_NO_WINDOWS')  # climb and walk on app windows
 
 
 def save_prefs():
@@ -123,7 +172,290 @@ class RECT(ctypes.Structure):
     _fields_ = [('left', ctypes.c_long), ('top', ctypes.c_long), ('right', ctypes.c_long), ('bottom', ctypes.c_long)]
 
 
+# ---- macOS: screens and window flags through the Objective-C runtime (no extra packages) ----
+if MAC:
+    import ctypes.util
+    _objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library('objc'))
+    ctypes.cdll.LoadLibrary(ctypes.util.find_library('AppKit'))
+    _objc.objc_getClass.restype = ctypes.c_void_p
+    _objc.objc_getClass.argtypes = [ctypes.c_char_p]
+    _objc.sel_registerName.restype = ctypes.c_void_p
+    _objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+    class CGRect(ctypes.Structure):
+        _fields_ = [('x', ctypes.c_double), ('y', ctypes.c_double), ('w', ctypes.c_double), ('h', ctypes.c_double)]
+
+    def _msg(obj, sel, *args, restype=ctypes.c_void_p, argtypes=()):
+        f = ctypes.cast(_objc.objc_msgSend, ctypes.CFUNCTYPE(restype, ctypes.c_void_p, ctypes.c_void_p, *argtypes))
+        return f(obj, _objc.sel_registerName(sel), *args)
+
+    def _nsapp():
+        return _msg(_objc.objc_getClass(b'NSApplication'), b'sharedApplication')
+
+    def mac_accessory():
+        """No Dock icon and no app menu: the crab is a background helper."""
+        _msg(_nsapp(), b'setActivationPolicy:', 1, argtypes=(ctypes.c_long,))
+        mac_no_focus_steal()
+
+    _ACT = {}  # keeps the ctypes callbacks and the original method alive
+
+    def mac_no_focus_steal():
+        """Tk calls [NSApp activateIgnoringOtherApps:] every time it shows a window, so a new crab (or a
+        hover bubble) pulled keyboard focus away from whatever you were typing in. Let activation through
+        only while a mouse button is held: a click or right-click menu on a crab still works, a crab that
+        just appears no longer takes focus."""
+        if _ACT:
+            return
+        _objc.class_getInstanceMethod.restype = ctypes.c_void_p
+        _objc.class_getInstanceMethod.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        _objc.method_setImplementation.restype = ctypes.c_void_p
+        _objc.method_setImplementation.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        proto = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool)
+        meth = _objc.class_getInstanceMethod(_objc.objc_getClass(b'NSApplication'), _objc.sel_registerName(b'activateIgnoringOtherApps:'))
+        if not meth:
+            return
+
+        def activate(self_, cmd, flag):
+            try:
+                if _msg(_objc.objc_getClass(b'NSEvent'), b'pressedMouseButtons', restype=ctypes.c_ulong):
+                    _ACT['orig'](self_, cmd, flag)
+            except Exception:
+                pass
+        _ACT['new'] = proto(activate)
+        _ACT['orig'] = proto(_objc.method_setImplementation(meth, ctypes.cast(_ACT['new'], ctypes.c_void_p)))
+
+    def mac_all_spaces():
+        """Show every crab window on all Spaces, also next to full-screen apps."""
+        wins = _msg(_nsapp(), b'windows')
+        for i in range(_msg(wins, b'count', restype=ctypes.c_ulong)):
+            nw = _msg(wins, b'objectAtIndex:', i, argtypes=(ctypes.c_ulong,))
+            _msg(nw, b'setCollectionBehavior:', 1 | 16 | 256, argtypes=(ctypes.c_ulong,))  # all spaces, stationary, full-screen aux
+            _msg(nw, b'setHasShadow:', False, argtypes=(ctypes.c_bool,))
+            _msg(nw, b'setLevel:', 25, argtypes=(ctypes.c_long,))  # status-bar level: above normal windows and Dock replacements
+            _msg(nw, b'setHidesOnDeactivate:', False, argtypes=(ctypes.c_bool,))
+
+    def mac_left_down():
+        """Is the left mouse button held right now (asked from the system, not from Tk's events)?"""
+        return bool(_msg(_objc.objc_getClass(b'NSEvent'), b'pressedMouseButtons', restype=ctypes.c_ulong) & 1)
+
+    def mac_screens():
+        """[(work, full, primary)] in Tk coordinates (origin top-left of the main screen, y down).
+        The work area leaves out the menu bar and the Dock, so the crab stands on top of the Dock."""
+        arr = _msg(_objc.objc_getClass(b'NSScreen'), b'screens')
+        raw = []
+        for i in range(_msg(arr, b'count', restype=ctypes.c_ulong)):
+            sc = _msg(arr, b'objectAtIndex:', i, argtypes=(ctypes.c_ulong,))
+            raw.append((_msg(sc, b'frame', restype=CGRect), _msg(sc, b'visibleFrame', restype=CGRect)))
+        if not raw:
+            return []
+        ph = raw[0][0].h  # Cocoa measures from the bottom of the main screen
+
+        def flip(r):
+            return (int(round(r.x)), int(round(ph - (r.y + r.h))), int(round(r.x + r.w)), int(round(ph - r.y)))
+        return [(flip(v), flip(f), i == 0) for i, (f, v) in enumerate(raw)]
+
+
+if MAC:
+    _V = ctypes.c_void_p
+    _cf = ctypes.cdll.LoadLibrary(ctypes.util.find_library('CoreFoundation'))
+    _cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library('CoreGraphics'))
+    _cg.CGWindowListCopyWindowInfo.restype = _V
+    _cg.CGWindowListCopyWindowInfo.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    _cg.CGRectMakeWithDictionaryRepresentation.argtypes = [_V, ctypes.POINTER(CGRect)]
+    _cf.CFArrayGetCount.argtypes = [_V]
+    _cf.CFArrayGetCount.restype = ctypes.c_long
+    _cf.CFArrayGetValueAtIndex.argtypes = [_V, ctypes.c_long]
+    _cf.CFArrayGetValueAtIndex.restype = _V
+    _cf.CFDictionaryGetValue.argtypes = [_V, _V]
+    _cf.CFDictionaryGetValue.restype = _V
+    _cf.CFNumberGetValue.argtypes = [_V, ctypes.c_long, _V]
+    _cf.CFStringCreateWithCString.argtypes = [_V, ctypes.c_char_p, ctypes.c_uint32]
+    _cf.CFStringCreateWithCString.restype = _V
+    _cf.CFRelease.argtypes = [_V]
+    _K_BOUNDS = _cf.CFStringCreateWithCString(None, b'kCGWindowBounds', 0x08000100)
+    _K_LAYER = _cf.CFStringCreateWithCString(None, b'kCGWindowLayer', 0x08000100)
+    _K_PID = _cf.CFStringCreateWithCString(None, b'kCGWindowOwnerPID', 0x08000100)
+
+    def mac_bars():
+        """Bars that other apps pin to a screen edge above normal windows (uBar and other Dock replacements):
+        [(left, top, right, bottom)]. The real Dock is already left out of the work area by macOS."""
+        out, me = [], os.getpid()
+        arr = _cg.CGWindowListCopyWindowInfo(1, 0)  # on-screen windows only
+        if not arr:
+            return out
+        try:
+            for i in range(_cf.CFArrayGetCount(arr)):
+                d = _cf.CFArrayGetValueAtIndex(arr, i)
+                n = ctypes.c_int(0)
+                lv, pv, bv = _cf.CFDictionaryGetValue(d, _K_LAYER), _cf.CFDictionaryGetValue(d, _K_PID), _cf.CFDictionaryGetValue(d, _K_BOUNDS)
+                if not (lv and bv):
+                    continue
+                _cf.CFNumberGetValue(lv, 3, ctypes.byref(n))
+                if not 0 < n.value < 1000:  # normal windows are 0; the menu bar and system overlays sit far higher
+                    continue
+                if pv:
+                    pid = ctypes.c_int(0)
+                    _cf.CFNumberGetValue(pv, 3, ctypes.byref(pid))
+                    if pid.value == me:
+                        continue
+                r = CGRect()
+                if _cg.CGRectMakeWithDictionaryRepresentation(bv, ctypes.byref(r)):
+                    out.append((int(r.x), int(r.y), int(r.x + r.w), int(r.y + r.h)))
+        finally:
+            _cf.CFRelease(arr)
+        return out
+
+    def mac_apply_bars(mons):
+        """A wide, low bar along the bottom of a screen counts as the floor: the crab stands on top of it."""
+        for bl, bt, br, bb in mac_bars():
+            for m in mons:
+                l, t, r, b = m.full
+                if bl <= l + 4 and br >= r - 4 and abs(bb - b) <= 4 and 12 <= bb - bt <= (b - t) // 4 and (br - bl) >= (r - l) * 0.6:
+                    wl, wt, wr, wb = m.work
+                    m.work = (wl, wt, wr, min(wb, bt))
+
+
+if MAC:
+    _K_NUM = _cf.CFStringCreateWithCString(None, b'kCGWindowNumber', 0x08000100)
+    _K_ALPHA = _cf.CFStringCreateWithCString(None, b'kCGWindowAlpha', 0x08000100)
+
+    def mac_windows():
+        """Normal app windows on screen, front to back: [(id, left, top, right, bottom)]. Also notes each window's app in WIN_PID."""
+        out, me = [], os.getpid()
+        WIN_PID.clear()
+        arr = _cg.CGWindowListCopyWindowInfo(1 | 16, 0)  # on-screen only, no desktop elements
+        if not arr:
+            return out
+        try:
+            for i in range(_cf.CFArrayGetCount(arr)):
+                d = _cf.CFArrayGetValueAtIndex(arr, i)
+                lv, pv, bv = _cf.CFDictionaryGetValue(d, _K_LAYER), _cf.CFDictionaryGetValue(d, _K_PID), _cf.CFDictionaryGetValue(d, _K_BOUNDS)
+                nv, av = _cf.CFDictionaryGetValue(d, _K_NUM), _cf.CFDictionaryGetValue(d, _K_ALPHA)
+                if not (lv and bv and nv):
+                    continue
+                n = ctypes.c_int(0)
+                _cf.CFNumberGetValue(lv, 3, ctypes.byref(n))
+                if n.value != 0:
+                    continue  # only normal windows: no menu bar, Dock, overlays
+                if pv:
+                    pid = ctypes.c_int(0)
+                    _cf.CFNumberGetValue(pv, 3, ctypes.byref(pid))
+                    if pid.value == me:
+                        continue
+                if av:
+                    a = ctypes.c_double(1.0)
+                    _cf.CFNumberGetValue(av, 6, ctypes.byref(a))
+                    if a.value < 0.05:
+                        continue  # an invisible helper window
+                r = CGRect()
+                if not _cg.CGRectMakeWithDictionaryRepresentation(bv, ctypes.byref(r)) or r.w < 160 or r.h < 90:
+                    continue
+                wid = ctypes.c_int(0)
+                _cf.CFNumberGetValue(nv, 3, ctypes.byref(wid))
+                out.append((wid.value, int(r.x), int(r.y), int(r.x + r.w), int(r.y + r.h)))
+                if pv:
+                    WIN_PID[wid.value] = pid.value
+        finally:
+            _cf.CFRelease(arr)
+        return out
+
+
+WIN_PID = {}   # window id -> the process that owns it
+PID_CACHE = {'t': 0.0, 'tree': {}, 'sid': {}}
+
+
+def app_pids(sid, now):
+    """The processes a chat runs inside (Claude, its shell, the terminal or app around it), from the pid file the mod writes.
+    A window owned by one of them is the chat's own window."""
+    if not MAC or not sid:
+        return ()
+    got = PID_CACHE['sid'].get(sid)
+    if got and now - got[0] < 120:
+        return got[1]
+    out = set()
+    try:
+        with open(os.path.join(BASE, 'pid-' + ''.join(ch for ch in sid if ch.isalnum() or ch in '_-')), encoding='utf-8') as fh:
+            pid = int(fh.read().strip())
+        if now - PID_CACHE['t'] > 60:
+            rows = subprocess.run(['ps', '-axo', 'pid=,ppid='], capture_output=True, text=True, timeout=5).stdout.split()
+            PID_CACHE['tree'] = {int(a): int(b) for a, b in zip(rows[0::2], rows[1::2])}
+            PID_CACHE['t'] = now
+        while pid > 1 and pid not in out:
+            out.add(pid)
+            pid = PID_CACHE['tree'].get(pid, 0)
+    except Exception:
+        pass
+    PID_CACHE['sid'][sid] = (now, out)
+    return out
+
+
+WIN_CACHE = {'t': 0.0, 'wins': [], 'tops': None, 'sides': None}
+
+
+def get_windows(now):
+    """App windows, front to back (macOS only for now). Asked at most three times a second, and only when a crab needs them."""
+    if not (MAC and WIN_EDGES):
+        return []
+    if now - WIN_CACHE['t'] > 0.3 or now < WIN_CACHE['t']:
+        try:
+            WIN_CACHE['wins'] = mac_windows()
+        except Exception:
+            WIN_CACHE['wins'] = []
+        WIN_CACHE['t'], WIN_CACHE['tops'], WIN_CACHE['sides'] = now, None, None
+    return WIN_CACHE['wins']
+
+
+def _cut(segs, a, b):
+    """Take the stretch a..b out of a list of (start, end) stretches."""
+    out = []
+    for s0, s1 in segs:
+        if b <= s0 or a >= s1:
+            out.append((s0, s1))
+        else:
+            if a > s0:
+                out.append((s0, a))
+            if b < s1:
+                out.append((b, s1))
+    return out
+
+
+def win_tops(now):
+    """The parts of each window's top edge that no window in front covers: [(id, y, x0, x1, window_left)]."""
+    wins = get_windows(now)
+    if WIN_CACHE['tops'] is None:
+        out = []
+        for i, (wid, l, t, r, b) in enumerate(wins):
+            segs = [(l, r)]
+            for _, fl, ft, fr, fb in wins[:i]:
+                if ft < t < fb:
+                    segs = _cut(segs, fl, fr)
+            out += [(wid, t, a, c, l) for a, c in segs]
+        WIN_CACHE['tops'] = out
+    return WIN_CACHE['tops']
+
+
+def win_sides(now):
+    """The uncovered parts of each window's left and right edges: [(id, 'L' or 'R', x, y0, y1, window_top)]."""
+    wins = get_windows(now)
+    if WIN_CACHE['sides'] is None:
+        out = []
+        for i, (wid, l, t, r, b) in enumerate(wins):
+            for side, ex in (('L', l), ('R', r)):
+                segs = [(t, b)]
+                for _, fl, ft, fr, fb in wins[:i]:
+                    if fl < ex < fr:
+                        segs = _cut(segs, ft, fb)
+                out += [(wid, side, ex, a, c, t) for a, c in segs]
+        WIN_CACHE['sides'] = out
+    return WIN_CACHE['sides']
+
+
 def work_area():
+    if MAC:
+        try:
+            return mac_screens()[0][0]
+        except Exception:
+            return 0, 0, 1280, 720
     r = RECT()
     ok = ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(r), 0)  # SPI_GETWORKAREA
     if not ok or r.right <= r.left:
@@ -164,22 +496,32 @@ MON_CACHE = {}
 
 
 def get_monitors():
-    u = ctypes.windll.user32
     found = []
-    PROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(RECT), ctypes.c_void_p)
+    if MAC:
+        try:
+            found = [Mon(w, f, p) for w, f, p in mac_screens()]
+        except Exception:
+            found = []
+        try:
+            mac_all_spaces()  # Tk can drop the window level again; keep the crabs in front
+        except Exception:
+            pass
+    else:
+        u = ctypes.windll.user32
+        PROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(RECT), ctypes.c_void_p)
 
-    def cb(h, dc, rc, lp):
-        mi = MONITORINFO()
-        mi.cbSize = ctypes.sizeof(MONITORINFO)
-        if u.GetMonitorInfoW(h, ctypes.byref(mi)):
-            w, f = mi.rcWork, mi.rcMonitor
-            found.append(Mon((w.left, w.top, w.right, w.bottom), (f.left, f.top, f.right, f.bottom), bool(mi.dwFlags & 1)))
-        return 1
+        def cb(h, dc, rc, lp):
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if u.GetMonitorInfoW(h, ctypes.byref(mi)):
+                w, f = mi.rcWork, mi.rcMonitor
+                found.append(Mon((w.left, w.top, w.right, w.bottom), (f.left, f.top, f.right, f.bottom), bool(mi.dwFlags & 1)))
+            return 1
 
-    try:
-        u.EnumDisplayMonitors(None, None, PROC(cb), 0)
-    except Exception:
-        found = []
+        try:
+            u.EnumDisplayMonitors(None, None, PROC(cb), 0)
+        except Exception:
+            found = []
     if not found:
         a = work_area()
         found.append(Mon(a, a, True))
@@ -197,7 +539,7 @@ def get_monitors():
     found = same
     link_monitors(found)
     try:
-        apply_taskbars(found)
+        (mac_apply_bars if MAC else apply_taskbars)(found)
     except Exception:
         pass
     return found
@@ -274,6 +616,9 @@ def in_any(mons, cx, cy):
 
 def tool_window(win):
     """Hide it from the taskbar and Alt+Tab, and don't steal focus when clicked."""
+    if MAC:
+        mac_all_spaces()
+        return
     user32 = ctypes.windll.user32
     hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
     style = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
@@ -324,6 +669,15 @@ def place(surf, x, y, w, h, dirn, S=None):
 class Crab:
     def __init__(self, root, cid, tier, main, mons, sid='', slot=0):
         self.id, self.main = cid, main
+        self.plat, self.plat_y, self.plat_seg, self.plat_l = None, 0, (0, 0), 0  # the window it stands on: id, top edge, walkable stretch, window left
+        self.plat_until, self.plat_leave, self.no_catch = 0.0, False, None
+        self.wclimb, self.wtop = None, 0   # (window id, 'L' or 'R') while it climbs the side of a window
+        self.menu_open = False
+        self.app_pids = ()                 # processes of the chat's own app, to know its window
+        self.ptr, self.ptr_t, self.ptr_near, self.flee_cd = (0, 0), 0.0, False, 0.0
+        self.dash_until, self.dash_k, self.chase_until = 0.0, 2.0, 0.0
+        self.play, self.racing = None, None  # a game planned with another crab; the crab it is racing
+        self.turn_t0, self.party_until = 0, 0.0
         self.sid, self.slot, self.label = sid, slot, ''
         self.climb, self.wall_until, self.roam_fall, self.vx = None, None, False, 0.0
         self.pose, self.pose_until = None, 0.0          # 'greet' (meeting a friend), 'break' (stretch), 'joy' (limit reset)
@@ -343,8 +697,11 @@ class Crab:
         self.win.overrideredirect(True)
         self.win.attributes('-topmost', True)
         self.win.configure(bg=KEY)
-        self.win.attributes('-transparentcolor', KEY)
-        self.cv = tk.Canvas(self.win, width=self.w, height=self.h, bg=KEY, highlightthickness=0, bd=0, cursor='hand2')
+        if MAC:
+            self.win.attributes('-transparent', True)
+        else:
+            self.win.attributes('-transparentcolor', KEY)
+        self.cv = tk.Canvas(self.win, width=self.w, height=self.h, bg=KEY, highlightthickness=0, bd=0, cursor='pointinghand' if MAC else 'hand2')
         self.cv.pack()
         left, top, right, bottom = bounds
         self.x = float(random.randint(left, max(left, right - self.w)))
@@ -357,7 +714,8 @@ class Crab:
         self.tx, self.ty = self.x, self.y
         self.vy = 0.0
         self.ceil_until = 0.0
-        self.speed = (70.0 if main else random.uniform(55.0, 95.0)) * self.scale / 2
+        self.base_speed = (70.0 if main else random.uniform(55.0, 95.0)) * self.scale / 2
+        self.speed = self.base_speed * SPEED
         self.resting = False
         self.shown = None
         self.pos_shown = None
@@ -368,6 +726,7 @@ class Crab:
         self.trick, self.trick_t0, self.next_trick = None, 0.0, now0 + 4
         self.shake_until, self.ox, self.oy = 0.0, 0, 0
         self.mood, self.tool, self.needs = 'ok', '', False
+        self.tool_t0, self.tool_seen = 0.0, 0  # when the prop in hand went up, and the newest tool start already shown
         self.exhausted = False  # usage at 90% or more: an idle crab goes to bed at once instead of wandering
         if main:  # the sleeping spot: the remembered one (or the corner of the main screen), shifted along the floor per chat
             hx0, m0, remembered = None, None, False
@@ -387,6 +746,8 @@ class Crab:
             if remembered or slot:
                 self.x, self.y = hx, float(self.floor_y())
         self.fx_t0, self.fx_swapped, self.fx_new = None, False, 'other'
+        self.vanishing = False  # its chat closed: the outfit-change puff plays and the crab is gone with it
+        self.appearing = False  # a new chat: the crab steps out of the same puff
         self.drag_off = (0, 0)
         self.win.geometry('%dx%d+%d+%d' % (self.w, self.h, int(self.x), int(self.y)))
         self.win.update_idletasks()
@@ -399,11 +760,16 @@ class Crab:
         self.cv.bind('<ButtonRelease-1>', self.on_release)
         self.cv.bind('<Double-Button-1>', self.on_double)
         self.cv.bind('<Button-3>', self.on_menu)
+        if MAC:  # on a Mac the right button is button 2, and Control-click is a right click too
+            self.cv.bind('<Button-2>', self.on_menu)
+            self.cv.bind('<Control-ButtonPress-1>', self.on_menu)
         self.cv.bind('<Enter>', self.on_enter)
         self.cv.bind('<Leave>', lambda ev: self.hide_tip())
 
     # ---- geometry helpers ----
     def floor_y(self):
+        if self.plat is not None:
+            return self.plat_y - self.fh + PAD  # standing on top of a window
         return self.bounds[3] - BOTTOM_MARGIN - self.fh + PAD  # + PAD: the window has a see-through strip under the feet
 
     def bed(self):
@@ -450,6 +816,172 @@ class Crab:
         self.shown = None
         self.pos_shown = None
 
+    # ---- app windows: climb a side, walk along the top ----
+    def plat_room(self, ytop):
+        """Is a window top at this height worth standing on: room above it, and clearly above the real floor?"""
+        l, t, r, b = self.mon.work
+        return t + self.fh - PAD <= ytop <= b - BOTTOM_MARGIN - self.fh * 0.6
+
+    def win_routes(self, now):
+        """Window sides that come down to the floor and lead to a top it can stand on: [(id, side, edge_x, window_top)]."""
+        out = []
+        l, t, r, b = self.mon.work
+        feet = b - BOTTOM_MARGIN
+        tops = win_tops(now)
+        for wid, side, ex, y0, y1, wt in win_sides(now):
+            if y1 < feet - 4 or abs(y0 - wt) > 1 or not self.plat_room(wt) or not l <= ex <= r:
+                continue  # it does not reach the floor, its top corner is covered, or there is no room on top
+            if side == 'R':
+                if ex + self.ww > r or not any(s[0] == wid and s[3] >= ex - 2 and s[3] - s[2] >= self.fw for s in tops):
+                    continue
+            elif ex - self.ww < l or not any(s[0] == wid and s[2] <= ex + 2 and s[3] - s[2] >= self.fw for s in tops):
+                continue
+            out.append((wid, side, ex, wt))
+        return out
+
+    def attach_win(self, route):
+        """At the foot of a window's side: turn onto it and climb to the top."""
+        _, wid, side, ex, wt = route
+        if DEBUG:
+            log('window climb %s side %s x=%d top=%d' % (wid, side, ex, wt))
+        self.set_surface('left' if side == 'R' else 'right')
+        self.x = float(ex - PAD if side == 'R' else ex - self.w + PAD)
+        self.y = float(min(self.y, self.bounds[3] - BOTTOM_MARGIN - self.h + PAD))
+        self.wclimb, self.wtop, self.wall_until = (wid, side), wt, None
+        self.tx, self.ty = self.x, float(wt - self.h / 2)
+        self.mode = 'walk'
+        self.pos_shown = None
+
+    def mount(self, now):
+        """At the top of the side: step over the corner onto the top of the window."""
+        wid, side = self.wclimb
+        ex = self.x + PAD if side == 'R' else self.x + self.w - PAD
+        self.wclimb = None
+        self.set_surface('floor')
+        self.x = float(ex - self.fw + PAD if side == 'R' else ex - PAD)
+        cx = self.x + self.fw / 2
+        seg = next((s for s in win_tops(now) if s[0] == wid and s[2] - 6 <= cx <= s[3] + 6), None)
+        if seg is None:
+            return self.drop()
+        self.land_on(seg, now)
+
+    def land_on(self, seg, now):
+        wid, ytop, x0, x1, wl = seg
+        if DEBUG:
+            log('on window %s y=%d x=%d..%d own=%s' % (wid, ytop, x0, x1, WIN_PID.get(wid) in self.app_pids))
+        self.plat, self.plat_y, self.plat_seg, self.plat_l = wid, ytop, (x0, x1), wl
+        stay = random.uniform(20, 45) * (2.5 if WIN_PID.get(wid) in self.app_pids else 1.0)  # longer on its own chat's window
+        self.plat_until, self.plat_leave, self.no_catch = now + stay, False, None
+        self.y, self.vy, self.roam_fall = float(self.floor_y()), 0.0, False
+        self.mode, self.pause_until = 'pause', now + 0.5
+        self.pos_shown = None
+
+    def drop(self):
+        """Let go of a window and fall to whatever is below."""
+        if DEBUG:
+            log('window drop plat=%s climb=%s at %d,%d' % (self.plat, self.wclimb, self.x, self.y))
+        self.no_catch = self.plat
+        self.plat, self.wclimb, self.plat_leave = None, None, False
+        if self.surf != 'floor':
+            self.set_surface('floor')
+        self.mode, self.vy, self.roam_fall = 'fall', 0.0, True
+
+    def leave_plat(self):
+        """Walk off the nearer end of the window top (the other end if that one is off the screen)."""
+        x0, x1 = self.plat_seg
+        ends = sorted((x1 - self.w / 2 + 10, x0 - self.w / 2 - 10), key=lambda v: abs(v - self.x))
+        ok = [v for v in ends if in_any(self.mons, v + self.w / 2, self.y + self.h / 2)]
+        if not ok:
+            return self.drop()
+        self.tx, self.ty, self.plat_leave, self.mode = float(ok[0]), self.y, True, 'walk'
+
+    def window_check(self, now):
+        """On a window: ride along when it moves, let go when it closes, shrinks or gets covered."""
+        if self.mode == 'drag':
+            return
+        if self.plat is not None:
+            W = next((w for w in get_windows(now) if w[0] == self.plat), None)
+            if W is not None and W[1] != self.plat_l:
+                d = W[1] - self.plat_l
+                self.x, self.tx, self.plat_l = self.x + d, self.tx + d, W[1]
+            cx = self.x + self.w / 2
+            seg = next((s for s in win_tops(now) if s[0] == self.plat and s[2] - 6 <= cx <= s[3] + 6), None)
+            if seg is None or not self.plat_room(seg[1]):
+                return self.drop()
+            self.plat_y, self.plat_seg = seg[1], (seg[2], seg[3])
+            if self.mode in ('walk', 'pause', 'rest') and abs(self.y - self.floor_y()) > 0.5:
+                self.y = self.ty = float(self.floor_y())
+        elif self.wclimb is not None:
+            wid, side = self.wclimb
+            ex = self.x + PAD if side == 'R' else self.x + self.w - PAD
+            mid = self.y + self.h / 2
+            if not any(s[0] == wid and s[1] == side and abs(s[2] - ex) <= 3 and s[3] <= max(self.wtop, mid) and s[4] >= mid - 2
+                       for s in win_sides(now)):
+                self.drop()
+
+    def walk_range(self):
+        """How far left and right it can walk where it stands: the window top, or the floor of its screen."""
+        if self.plat is not None:
+            x0, x1 = self.plat_seg
+            return float(x0), float(max(x0, x1 - self.w))
+        l, t, r, b = self.bounds
+        return float(l), float(max(l, r - self.w))
+
+    def pointer_play(self, now):
+        """Now and then it trots after the pointer for a few seconds, or scuttles off when the pointer comes close."""
+        if now - self.ptr_t > 0.12:
+            self.ptr_t, self.ptr = now, self.win.winfo_pointerxy()
+        px, py = self.ptr
+        lo, hi = self.walk_range()
+        if now < self.chase_until:
+            tx = min(max(px - self.w / 2, lo), hi)
+            if abs(tx - self.x) > 8:
+                self.tx, self.ty, self.mode, self.climb = tx, float(self.floor_y()), 'walk', None
+            elif self.mode == 'walk':
+                self.mode, self.pause_until = 'pause', now + 0.3
+            return
+        cx, cy = self.x + self.w / 2, self.y + self.h / 2
+        over = abs(px - cx) < self.w / 2 and abs(py - cy) < self.h / 2  # the pointer is on the crab: it wants a pet, not a chase
+        near = not over and math.hypot(px - cx, py - cy) < 150 * self.scale / 3
+        if near and not self.ptr_near and now >= self.flee_cd and self.racing is None:
+            self.flee_cd = now + 25
+            if random.random() < 0.5:
+                d = 1 if cx >= px else -1
+                tx = min(max(self.x + d * random.uniform(260, 460) * self.scale / 3, lo), hi)
+                if abs(tx - self.x) < 60:  # cornered: dart past the pointer instead
+                    tx = min(max(self.x - d * random.uniform(260, 460) * self.scale / 3, lo), hi)
+                self.tx, self.ty, self.mode, self.climb = tx, float(self.floor_y()), 'walk', None
+                self.dash_until, self.dash_k = now + 3, 2.2
+                if DEBUG:
+                    log('flee %s to %d' % (self.sid[:6], tx))
+        self.ptr_near = near
+
+    def start_play(self, now):
+        """The game it agreed on with another crab after waving: a race, or a hop over the other one."""
+        kind, at, a, b = self.play
+        self.play = None
+        if DEBUG:
+            log('play %s %s with %s' % (kind, self.sid[:6], b.sid[:6]))
+        if self.surf != 'floor' or self.mode not in ('walk', 'pause') or self.wclimb is not None:
+            return
+        if kind == 'race':
+            lo, hi = self.walk_range()
+            self.tx, self.ty, self.mode, self.climb = min(max(a, lo), hi), float(self.floor_y()), 'walk', None
+            self.dash_until, self.dash_k, self.racing = now + 8, random.uniform(1.8, 2.6), b
+        else:  # hop over the other crab
+            dist, high = abs(b.x - self.x) + b.w * 0.9, b.h * 0.75
+            self.vy = -math.sqrt(2 * GRAVITY * high)
+            self.dir = 1 if b.x > self.x else -1
+            self.vx = self.dir * dist / (2 * abs(self.vy) / GRAVITY)
+            self.mode = 'jump'
+
+    def catch(self, prev_y, now):
+        """Falling: the top of a window right under its feet catches it."""
+        f0, f1, cx = prev_y + self.fh - PAD, self.y + self.fh - PAD, self.x + self.w / 2
+        hits = [s for s in win_tops(now) if s[2] <= cx <= s[3] and f0 <= s[1] <= f1 and s[0] != self.no_catch
+                and s[3] - s[2] >= self.fw and self.plat_room(s[1])]
+        return min(hits, key=lambda s: s[1]) if hits else None
+
     # ---- hover label (only when several chats each have a crab) ----
     def on_enter(self, ev):
         if self.label and self.mode != 'drag' and self.tip is None and self.tip_after is None:
@@ -463,18 +995,53 @@ class Crab:
             t = tk.Toplevel(self.win)
             t.overrideredirect(True)
             t.attributes('-topmost', True)
-            tk.Label(t, text=self.card_text(), justify='left', bg='#2b2b2f', fg='#f4f3ee', font=('Segoe UI', 9), padx=8, pady=4).pack()
-            t.update_idletasks()
-            tw, th = t.winfo_reqwidth(), t.winfo_reqheight()
+            t.configure(bg=KEY)
+            if MAC:
+                t.attributes('-transparent', True)
+            else:
+                t.attributes('-transparentcolor', KEY)
+            # a speech bubble: a rounded box with a tail that points at the crab
+            import tkinter.font as tkfont
+            size = 12 if MAC else 9
+            f, fb = tkfont.Font(family=UI_FONT, size=size), tkfont.Font(family=UI_FONT, size=size, weight='bold')
+            lines = self.card_text().split('\n')
+            lh = f.metrics('linespace')
+            px, py, rad, tail = 11, 7, 9, 9
+            tw = max([fb.measure(lines[0])] + [f.measure(v) for v in lines[1:]]) + px * 2 + 2
+            bh = lh * len(lines) + py * 2
+            th = bh + tail + 2
             l, tp, r, b = self.bounds
-            x = int(min(max(self.x + self.w / 2 - tw / 2, l), r - tw))
-            y = int(self.y + TOP_PAD - th - 6) if self.surf == 'floor' else int(self.y - th - 4)
-            if y < tp:
+            cx = self.x + self.w / 2
+            x = int(min(max(cx - tw / 2, l), r - tw))
+            y = int(self.y + TOP_PAD - th - 2) if self.surf == 'floor' else int(self.y - th - 2)
+            below = y < tp  # no room above: hang the bubble under the crab, tail on top
+            if below:
                 y = int(self.y + self.h + 2)
+            cv = tk.Canvas(t, width=tw, height=th, bg=KEY, highlightthickness=0, bd=0)
+            cv.pack()
+            ink, paper = '#2b2b2f', '#f4f3ee'
+            y0 = tail + 1 if below else 1
+            x0, x1, y1 = 1, tw - 2, y0 + bh - 1
+            pts = [x0 + rad, y0, x1 - rad, y0, x1, y0, x1, y0 + rad, x1, y1 - rad, x1, y1, x1 - rad, y1,
+                   x0 + rad, y1, x0, y1, x0, y1 - rad, x0, y0 + rad, x0, y0]
+            cv.create_polygon(pts, smooth=True, fill=paper, outline=ink, width=2)
+            ax = int(min(max(cx - x, rad + tail + 2), tw - rad - tail - 2))  # the tail's tip sits over the crab
+            if below:
+                cv.create_polygon(ax - tail, y0 + 1, ax, 1, ax + tail, y0 + 1, fill=paper, outline='')
+                cv.create_line(ax - tail, y0, ax, 1, ax + tail, y0, fill=ink, width=2)
+            else:
+                cv.create_polygon(ax - tail, y1 - 1, ax, th - 1, ax + tail, y1 - 1, fill=paper, outline='')
+                cv.create_line(ax - tail, y1, ax, th - 1, ax + tail, y1, fill=ink, width=2)
+            for n, v in enumerate(lines):
+                cv.create_text(x0 + px, y0 + py + n * lh, text=v, anchor='nw', fill='#1f1e1d', font=fb if n == 0 else f)
             t.geometry('+%d+%d' % (x, y))
-            hwnd = ctypes.windll.user32.GetParent(t.winfo_id()) or t.winfo_id()
-            st_ = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, st_ | 0x80 | 0x08000000)  # TOOLWINDOW | NOACTIVATE
+            if MAC:
+                t.update_idletasks()
+                mac_all_spaces()
+            else:
+                hwnd = ctypes.windll.user32.GetParent(t.winfo_id()) or t.winfo_id()
+                st_ = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
+                ctypes.windll.user32.SetWindowLongW(hwnd, -20, st_ | 0x80 | 0x08000000)  # TOOLWINDOW | NOACTIVATE
             self.tip = t
         except Exception:
             self.tip = None
@@ -488,7 +1055,7 @@ class Crab:
                 what = 'Waiting for you'
             elif i.get('busy'):
                 t = i.get('tool', '')
-                what = {'lens': 'Looking through files', 'hammer': 'Editing files', 'term': 'Running commands'}.get(TOOL_PROP.get(t, ''), ('Using ' + t) if t else 'Thinking')
+                what = PROP_SAYS.get(prop_for(t) or '', ('Using ' + t) if t else 'Thinking')
             else:
                 what = 'Resting'
             n = i.get('agents', 0)
@@ -532,9 +1099,12 @@ class Crab:
     # ---- mouse: drag, drop, stick ----
     def on_press(self, ev):
         self.hide_tip()
+        if DEBUG:
+            log('press %s at %d,%d' % (self.sid[:6], ev.x_root, ev.y_root))
         self.idle_since = time.time()
         self.press_t, self.press_xy, self.moved, self.petting = time.time(), (ev.x_root, ev.y_root), False, False
         self.wall_until, self.climb = None, None
+        self.plat, self.wclimb, self.plat_leave, self.no_catch = None, None, False, None
         self.mode = 'drag'
         self.vy = 0.0
         if self.surf != 'floor':
@@ -554,9 +1124,27 @@ class Crab:
         self.pos_shown = (int(self.x), int(self.y))
         self.win.geometry('+%d+%d' % (int(self.x), int(self.y)))
 
-    def on_release(self, ev):
+    def mac_drag_poll(self):
+        """macOS stops sending motion events when a fast pointer leaves the small window, which dropped the crab.
+        While dragging, follow the real pointer and watch the real button instead."""
+        class E:
+            pass
+        e = E()
+        e.x_root, e.y_root = self.win.winfo_pointerxy()
+        if mac_left_down():
+            self.on_motion(e)
+        else:
+            self.on_release(e, real=True)
+
+    def on_release(self, ev, real=False):
         if self.mode != 'drag':
             return
+        if MAC and not real:
+            # Tk reports a release when a fast pointer outruns the window; trust only the real button (mac_drag_poll)
+            if DEBUG:
+                log('tk release ignored=%s' % mac_left_down())
+            if mac_left_down():
+                return
         if not self.moved:  # just a click or a pet, not a drag: stay where it is
             self.petting = False
             if self.y < self.floor_y() - 2:
@@ -599,14 +1187,35 @@ class Crab:
         for n, label in ((2, 'Small'), (3, 'Medium'), (4, 'Large'), (5, 'Extra large')):
             sm.add_command(label=label + (' (now)' if n == SCALE else ''), command=lambda n=n: APP['size'](n))
         m.add_cascade(label='Change size', menu=sm)
+        pm = tk.Menu(m, tearoff=0)
+        for v, label in SPEEDS:
+            pm.add_command(label=label + (' (now)' if abs(v - SPEED) < 0.02 else ''), command=lambda v=v: APP['speed'](v))
+        m.add_cascade(label='Change speed', menu=pm)
+        xm = tk.Menu(m, tearoff=0)  # everything else that settings.json holds
+        hm = tk.Menu(xm, tearoff=0)
+        for v in (0, 1, 2, 3, 5, 8):
+            hm.add_command(label=('Off' if v == 0 else '%d seconds' % v if v > 1 else '1 second') + (' (now)' if abs(v - PROP_HOLD) < 0.01 else ''),
+                           command=lambda v=v: APP['pref']('prop_seconds', v))
+        xm.add_cascade(label='Tool props stay up at least', menu=hm)
+        cm = tk.Menu(xm, tearoff=0)
+        for v in (0, 1, 5, 10, 20, 30):
+            cm.add_command(label=('Never' if v == 0 else '%d minutes' % v if v > 1 else '1 minute') + (' (now)' if abs(v * 60 - PARTY_S) < 0.5 else ''),
+                           command=lambda v=v: APP['pref']('party_minutes', v))
+        xm.add_cascade(label='Confetti after a turn of', menu=cm)
+        if MAC:  # window climbing is macOS only for now
+            xm.add_command(label=('✓ ' if WIN_EDGES else '    ') + 'Climb app windows', command=lambda: APP['pref']('window_edges', not WIN_EDGES))
+        xm.add_command(label=('✓ ' if POINTER_PLAY else '    ') + 'Play with the pointer', command=lambda: APP['pref']('pointer_play', not POINTER_PLAY))
+        m.add_cascade(label='Options', menu=xm)
         m.add_command(label='Wake up' if self.sleeping else 'Put to sleep', command=lambda: APP['sleep'](self))
         m.add_command(label='Hide for 1 hour', command=APP['hide'])
         m.add_separator()
-        m.add_command(label='Quit crab', command=APP['quit'])
+        m.add_command(label='Quit Crabby', command=APP['quit'])
+        self.menu_open = True  # stand still while the menu is up
         try:
             m.tk_popup(ev.x_root, ev.y_root)
         finally:
             m.grab_release()
+            self.menu_open = False
 
     def shake(self, now):
         self.shake_until = now + 1.3
@@ -641,19 +1250,70 @@ class Crab:
         self.fx_new = want if want in OUTFITS else random.choice(choices)
         self.fx_t0, self.fx_swapped = now, False
 
+    # ---- leaving: its chat closed ----
+    VANISH_S = 1.1  # as long as the outfit change: puff, sparkles, done
+
+    def vanish(self, now):
+        """Start the same puff as an outfit change, but the crab does not come back out of it."""
+        self.hide_tip()
+        self.vanishing = True
+        self.fx_t0, self.fx_swapped = now, True
+        self.mode, self.tool, self.needs, self.pose, self.trick, self.petting = 'pause', '', False, None, None, False
+        self.ox = self.oy = 0
+        self.shown = None
+
+    def appear(self, now):
+        """A new chat: the same puff as an outfit change, with the crab only showing as it clears."""
+        self.appearing = True
+        self.fx_t0, self.fx_swapped = now, True
+        self.mode, self.pause_until = 'pause', now + self.VANISH_S
+        self.shown = None
+
+    def vanish_tick(self, now):
+        """One frame of the puff; True once it has played out and the window can go."""
+        if self.fx_t0 is None or now - self.fx_t0 >= self.VANISH_S:
+            return True
+        self.draw(now, False, False, False, 'ok', False, False)
+        return False
+
     # ---- behaviour ----
     def pick_target(self):
         left, top, right, bottom = self.bounds
         low = bottom - BOTTOM_MARGIN - self.h + PAD
+        now = time.time()
+        if now < self.chase_until:
+            return  # it is following the pointer
+        if POINTER_PLAY and self.main and self.surf == 'floor' and self.wclimb is None and random.random() < 0.12:
+            self.chase_until = now + random.uniform(8, 12)  # now and then: trot after the pointer for a few seconds
+            if DEBUG:
+                log('chase %s' % self.sid[:6])
+            return
+        if self.wclimb is not None:  # keep climbing to the top of the window
+            self.tx, self.ty, self.mode = self.x, float(self.wtop - self.h / 2), 'walk'
+            return
+        if self.plat is not None:  # stroll along the top of the window, then walk off an end
+            if now >= self.plat_until:
+                return self.leave_plat()
+            x0, x1 = self.plat_seg
+            self.climb, self.ty, self.mode = None, float(self.floor_y()), 'walk'
+            self.tx = random.uniform(x0, max(x0, x1 - self.w))
+            return
         if self.surf == 'floor':
+            routes = self.win_routes(now) if random.random() < 0.3 else []
+            if routes:  # sometimes climb the side of a window and walk along its top
+                own = [v for v in routes if WIN_PID.get(v[0]) in self.app_pids]  # the window its own chat lives in
+                wid, side, ex, wt = random.choice(own if own and random.random() < 0.8 else routes)
+                self.climb = ('win', wid, side, ex, wt)
+                self.tx, self.ty, self.mode = float(ex - PAD if side == 'R' else ex - self.w + PAD), low, 'walk'
+                return
             tm = self.mon
-            if len(self.mons) > 1 and random.random() < 0.3:  # now and then, visit another screen
+            if len(self.mons) > 1 and random.random() < 0.3 * min(1.0, SPEED):  # now and then, visit another screen
                 tm = random.choice([m for m in self.mons if m is not self.mon])
             left, top, right, bottom = tm.work
             low = bottom - BOTTOM_MARGIN - self.h + PAD
             self.climb = None
             edges = [sd for sd, ok in (('left', tm.outer[0]), ('right', tm.outer[2])) if ok]
-            if edges and tm is self.mon and random.random() < 0.25:  # sometimes go and climb a side wall of the desktop
+            if edges and tm is self.mon and random.random() < 0.25 * min(1.0, SPEED):  # sometimes go and climb a side wall of the desktop
                 self.climb = random.choice(edges)
                 self.tx = float(left) if self.climb == 'left' else float(right - self.w)
             else:
@@ -689,7 +1349,7 @@ class Crab:
         mood = self.mood if main else 'ok'
         still = main and (self.sleeping or mood == 'dead')       # stays where it is
         calling = main and self.needs and mood != 'dead'         # Claude waits for the user
-        if main and self.fx_t0 is None and self.mode not in ('drag', 'fall', 'ceil') and now >= self.next_outfit:
+        if main and self.fx_t0 is None and self.mode not in ('drag', 'fall', 'ceil') and now >= self.next_outfit and not PREFS.get('outfit_keep'):
             self.start_fx(now)
         if self.fx_t0 is not None:
             active = True
@@ -700,7 +1360,7 @@ class Crab:
                     PREFS['outfit'] = self.tier
                     save_prefs()
             if t >= 1.1:
-                self.fx_t0 = None
+                self.fx_t0, self.appearing = None, False
                 self.next_outfit = now + random.uniform(*OUTFIT_EVERY)
 
         if main:  # any activity resets the idle clock (a sleeping or collapsed crab only wakes for the mouse)
@@ -717,7 +1377,9 @@ class Crab:
             if getattr(self, 'mig_at', None) is None:
                 self.mig_at = now + random.uniform(*MIGRATE_AFTER)
             elif now >= self.mig_at and self.mode not in ('fall', 'ceil', 'jump'):
-                if self.surf != 'floor':
+                if self.plat is not None or self.wclimb is not None:
+                    self.drop()  # get down from the window first
+                elif self.surf != 'floor':
                     self.set_surface('floor')  # climb down from the wall first; it heads over once it lands
                     self.wall_until = None
                     self.mode, self.vy, self.roam_fall = 'fall', 0.0, True
@@ -749,6 +1411,11 @@ class Crab:
               and self.start_pose('break', now, 2.8)):
             self.next_break = now + BREAK_EVERY_S  # an hour of work: stretch and yawn
 
+        if self.plat is not None or self.wclimb is not None:
+            self.window_check(now)
+        if self.play is not None and now >= self.play[1] and self.pose is None:
+            self.start_play(now)
+
         walking = False
         if self.mode == 'drag':
             active, walking = True, True  # legs dangle and kick
@@ -758,10 +1425,15 @@ class Crab:
                 walking = False
         elif self.mode == 'fall':
             active, walking = True, True
+            prev_y = self.y
             self.vy += GRAVITY * dt
             self.y += self.vy * dt
             fy = self.floor_y()
-            if self.y >= fy:
+            seg = self.catch(prev_y, now) if (self.plat is None and self.surf == 'floor') else None
+            if seg is not None:
+                self.land_on(seg, now)  # landed on top of a window
+            elif self.y >= fy:
+                self.no_catch = None
                 self.y, self.vy = float(fy), 0.0
                 self.home = (self.x, float(fy))  # rest where it landed
                 if main and self.slot == 0 and not self.roam_fall and self.mon is self.mons[0]:  # only a drop on the main screen is remembered
@@ -790,18 +1462,28 @@ class Crab:
             if now >= self.ceil_until:
                 self.set_surface('floor')
                 self.mode, self.vy = 'fall', 0.0
+        elif self.menu_open and self.mode in ('walk', 'pause', 'rest'):
+            pass  # its menu is open: hold still so the menu stays next to it
         elif self.pose is not None and self.mode in ('walk', 'pause', 'rest'):
             pass  # greeting a friend, stretching or hopping for joy: stand still for a moment
         else:
             idle_main = main and not working and not still and not calling
+            roaming = False
             if still or calling:
                 self.mode = 'rest'
+            elif self.wclimb is not None:  # halfway up a window: finish the climb
+                if self.mode != 'walk':
+                    self.pick_target()
             elif idle_main and (self.surf == 'floor' or self.wall_until is not None) and not self.exhausted and now - self.idle_since < WANDER_IDLE_S:
                 # just went quiet: wander around like when working, before going to bed
+                roaming = True
                 if self.mode == 'rest':
                     self.mode, self.pause_until = 'pause', now + 0.3
                 if self.mode == 'pause' and now >= self.pause_until:
                     self.pick_target()
+            elif idle_main and self.plat is not None:  # bedtime on top of a window: doze right there
+                self.plat_leave = False
+                self.mode = 'rest'
             elif idle_main:
                 if self.surf == 'floor':
                     self.climb = None
@@ -813,27 +1495,49 @@ class Crab:
                 else:
                     self.mode = 'rest'  # stuck to a wall: sleep right there
             else:
+                roaming = True
                 if self.mode == 'rest':
                     self.mode, self.pause_until = 'pause', now + 0.3
                 if self.mode == 'pause' and now >= self.pause_until:
                     self.pick_target()
+            if (roaming and main and POINTER_PLAY and self.surf == 'floor' and self.mode in ('walk', 'pause')
+                    and not self.plat_leave and not isinstance(self.climb, tuple) and mood != 'dead'):
+                self.pointer_play(now)
             if self.mode == 'walk':
                 dx, dy = self.tx - self.x, self.ty - self.y
                 dist = (dx * dx + dy * dy) ** 0.5
-                step = self.speed * dt * (0.55 if mood == 'tired' else 1.0)
+                pace = self.speed
+                if now < self.chase_until:  # pointer games run at a lively pace, whatever the speed setting
+                    pace = max(self.speed, self.base_speed) * 1.7
+                elif now < self.dash_until:
+                    pace = max(self.speed, self.base_speed) * self.dash_k
+                step = pace * dt * (0.55 if mood == 'tired' else 1.0)
                 if dist <= step or dist < 1:
                     self.x, self.y = self.tx, self.ty
-                    if self.climb and self.surf == 'floor':
+                    rival, self.racing = self.racing, None
+                    if rival is not None:  # first to the end of the race: a little cheer
+                        self.dash_until = 0.0
+                        if rival.racing is self:
+                            rival.racing, rival.dash_until = None, 0.0
+                            self.start_pose('joy', now, 1.6)
+                    if self.wclimb is not None:
+                        self.mount(now)
+                    elif self.plat_leave:
+                        self.drop()
+                    elif self.climb and self.surf == 'floor':
                         side, self.climb = self.climb, None
-                        self.attach(side)
-                        self.wall_until = now + random.uniform(8, 20)
+                        if isinstance(side, tuple):
+                            self.attach_win(side)
+                        else:
+                            self.attach(side)
+                            self.wall_until = now + random.uniform(8, 20)
                     elif idle_main:
                         self.mode = 'rest'
                     else:
-                        self.mode, self.pause_until = 'pause', now + random.uniform(0.6, 3.0)
+                        self.mode, self.pause_until = 'pause', now + random.uniform(0.6, 3.0) / SPEED
                 else:
-                    if (self.surf == 'floor' and mood == 'ok' and dist > 180 * self.scale / 3 and abs(self.y - self.floor_y()) < 3
-                            and random.random() < dt / 7.0):
+                    if (self.surf == 'floor' and self.plat is None and mood == 'ok' and dist > 180 * self.scale / 3 and abs(self.y - self.floor_y()) < 3
+                            and random.random() < dt / 7.0 * SPEED):
                         self.start_jump(1 if dx > 0 else -1)  # now and then it hops
                     nx, ny = self.x + dx / dist * step, self.y + dy / dist * step
                     if self.surf == 'floor' and not in_any(self.mons, nx + self.w / 2, ny + self.h / 2):
@@ -852,7 +1556,7 @@ class Crab:
                     active = True
         if self.mode != self.prev_mode:
             if self.mode == 'rest':
-                self.rest_since, self.next_trick, self.trick = now, now + random.uniform(2, 5), None
+                self.rest_since, self.next_trick, self.trick = now, now + random.uniform(2, 5) / SPEED, None
             self.prev_mode = self.mode
         self.resting = self.mode == 'rest'
 
@@ -863,7 +1567,7 @@ class Crab:
             if self.trick is None and now >= self.next_trick:
                 self.trick, self.trick_t0 = random.choice(('blink', 'wave', 'hop', 'yawn')), now
             if self.trick is not None and now - self.trick_t0 > TRICK_DUR[self.trick]:
-                self.trick, self.next_trick = None, now + random.uniform(5, 13)
+                self.trick, self.next_trick = None, now + random.uniform(5, 13) / SPEED
         else:
             self.trick = None
         shaking = main and now < self.shake_until
@@ -913,7 +1617,7 @@ class Crab:
         main = self.main
         fx_t = None if self.fx_t0 is None else now - self.fx_t0
         trick = self.trick if main else None
-        prop = TOOL_PROP.get(self.tool) if (main and working and not calling) else None
+        prop = prop_for(self.tool) if (main and not calling and (working or now - self.tool_t0 < PROP_HOLD)) else None
         pose = self.pose
         petting = main and self.petting
         smooth = fx_t is not None or pose is not None or petting or (main and ((hearts and self.surf == 'floor') or trick or calling or shaking))
@@ -944,7 +1648,7 @@ class Crab:
         fr = tick if tick >= 0 else 0
         claws_up = pose in ('break', 'joy')
         waving = (trick == 'wave') or calling or pose == 'greet' or claws_up
-        show_crab = fx_t is None or fx_t < 0.2 or fx_t > 0.5
+        show_crab = fx_t is None or (fx_t < 0.2 and not self.appearing) or (fx_t > 0.5 and not self.vanishing)
         bob = 1 if walking and self.phase == 1 else 0
         if show_crab:
             for x, y, w, h, col, cls in SPRITES[self.tier]:
@@ -999,10 +1703,10 @@ class Crab:
             if prop == 'lens':
                 sh = 0 if (fr // 2) % 2 == 0 else 1
                 for rx, ry, rw, rh in ((26, 1, 2, 1), (26, 4, 2, 1), (25, 2, 1, 2), (28, 2, 1, 2)):
-                    R(rx + sh, ry, rw, rh, '#3a3a3c')
+                    R(rx + sh, ry, rw, rh, '#e6e8ee')  # a light rim, so it shows on a dark desktop
                 R(26 + sh, 2, 2, 2, '#a9d6f5')
-                R(28 + sh, 5, 1, 1, '#3a3a3c')
-                R(29 + sh, 6, 1, 1, '#3a3a3c')
+                R(28 + sh, 5, 1, 1, '#c79a5b')
+                R(29 + sh, 6, 1, 1, '#c79a5b')
             elif prop == 'hammer':
                 if (fr // 2) % 2 == 0:
                     R(27, 4, 1, 5, '#7a4a26')
@@ -1011,12 +1715,36 @@ class Crab:
                     R(27, 6, 1, 4, '#7a4a26')
                     R(25, 8, 5, 2, '#8e929a')
             elif prop == 'term':
+                R(22, 0, 9, 8, '#cfd8e6')  # a light frame, so the screen shows on a dark desktop
                 R(23, 1, 7, 6, '#2b2b2f')
                 R(24, 2, 1, 1, '#7fe08a')
                 R(25, 3, 1, 1, '#7fe08a')
                 R(24, 4, 1, 1, '#7fe08a')
                 if (fr // 2) % 2 == 0:
                     R(26, 4, 2, 1, '#e6e8ee')
+            elif prop == 'globe':  # the web: a little turning globe
+                R(25, 1, 4, 1, '#4aa3e8')
+                R(24, 2, 6, 4, '#4aa3e8')
+                R(25, 6, 4, 1, '#4aa3e8')
+                k = (fr // 2) % 3
+                R(24 + k, 2, 2, 2, '#6fcf7a')
+                R(26 + k, 4, 2, 2, '#6fcf7a')
+                R(25, 1, 1, 1, '#d6efff')
+            elif prop == 'plug':  # a connected tool: a plug with two pins
+                up = 0 if (fr // 2) % 2 == 0 else 1
+                R(25, 1 + up, 1, 2, '#e8c14a')
+                R(28, 1 + up, 1, 2, '#e8c14a')
+                R(24, 3 + up, 6, 3, '#e6e8ee')
+                R(26, 6 + up, 2, 1, '#e6e8ee')
+                R(27, 7 + up, 1, 2, '#9aa3b5')
+            elif prop == 'clip':  # the to-do list: a clipboard that gets ticked off
+                R(24, 1, 6, 8, '#c79a5b')
+                R(25, 2, 4, 6, '#f4f3ee')
+                R(26, 0, 2, 2, '#9aa3b5')
+                for n in range(3):
+                    done = n <= (fr // 3) % 4 - 1
+                    R(26, 3 + n * 2, 1, 1, '#3fb950' if done else '#9aa3b5')
+                    R(27, 3 + n * 2, 2, 1, '#5b6f95')
             if self.cup:  # morning coffee in the free claw
                 R(1, 10, 4, 4, '#f4f3ee')
                 R(1, 10, 4, 1, '#6b3f1d')
@@ -1048,13 +1776,15 @@ class Crab:
                     cv.create_rectangle(sx - 4, sy - 1, sx + 4, sy + 1, fill=col, outline='')
         elif calling:  # "I need you": jumping and waving, with a gold question mark
             x0, y0 = pt(-14, 8)
-            cv.create_text(x0, y0, text='?', fill='#e8a317', font=('Segoe UI', 14, 'bold'))
+            if self.tool == 'AskUserQuestion':  # Claude asked a question: it holds up a question card
+                cv.create_rectangle(x0 - 9, y0 - 11, x0 + 9, y0 + 11, fill='#f4f3ee', outline='#e8a317', width=2)
+            cv.create_text(x0, y0, text='?', fill='#e8a317', font=(UI_FONT, 14, 'bold'))
         elif shaking:  # a turn failed
             x0, y0 = pt(0, 10)
-            cv.create_text(x0, y0, text='!', fill='#e5484d', font=('Segoe UI', 16, 'bold'))
+            cv.create_text(x0, y0, text='!', fill='#e5484d', font=(UI_FONT, 16, 'bold'))
         elif pose == 'greet':  # two crabs meet
             x0, y0 = pt(0, 10)
-            cv.create_text(x0, y0, text='♥', fill='#ff6f8d', font=('Segoe UI Symbol', 12, 'bold'))
+            cv.create_text(x0, y0, text='♥', fill='#ff6f8d', font=(SYM_FONT, 12, 'bold'))
         elif pose == 'break':  # a long stretch of work: time for a coffee break
             x0, y0 = pt(0, 12)
             cv.create_rectangle(x0 - 8, y0 - 4, x0 + 6, y0 + 8, fill='#f4f3ee', outline='')  # a little coffee cup
@@ -1062,21 +1792,30 @@ class Crab:
             cv.create_rectangle(x0 + 6, y0, x0 + 10, y0 + 5, fill='#f4f3ee', outline='')
             cv.create_rectangle(x0 - 5, y0 - 12, x0 - 3, y0 - 7, fill='#cfd8e6', outline='')
             cv.create_rectangle(x0 + 1, y0 - 14, x0 + 3, y0 - 9, fill='#cfd8e6', outline='')
+        elif pose == 'joy' and now < self.party_until:  # a long turn is done: confetti
+            for i in range(12):
+                rise = ((now * 26 + i * 11) % 34)
+                x0, y0 = pt(-30 + i * 5.5 + 4 * math.sin(now * 5 + i), 2 + rise)
+                col = ('#ffd45e', '#ff6f8d', '#6fcf7a', '#4aa3e8', '#c58af9')[i % 5]
+                if i % 2:
+                    cv.create_rectangle(x0 - 2, y0 - 3, x0 + 2, y0 + 3, fill=col, outline='')
+                else:
+                    cv.create_rectangle(x0 - 3, y0 - 2, x0 + 3, y0 + 2, fill=col, outline='')
         elif pose == 'joy':  # the usage limit reset
             for i, off in enumerate((-14, 0, 14)):
                 x0, y0 = pt(off, 6 + ((now * 18 + i * 7) % 18))
-                cv.create_text(x0, y0, text='✦', fill='#ffd45e', font=('Segoe UI Symbol', 11, 'bold'))
+                cv.create_text(x0, y0, text='✦', fill='#ffd45e', font=(SYM_FONT, 11, 'bold'))
         elif main and (hearts or petting) and self.surf == 'floor':
             for i, off in enumerate((-16, 0, 16)):
                 up = 4 + ((now * 14 + i * 9) % 26)
                 x0, y0 = pt(off, up)
-                cv.create_text(x0, y0, text='♥', fill='#ff6f8d', font=('Segoe UI Symbol', 11, 'bold'))
+                cv.create_text(x0, y0, text='♥', fill='#ff6f8d', font=(SYM_FONT, 11, 'bold'))
         elif main and self.asleep:
             t = 2 if self.deep else int(now * 1.5) % 3
             for i in range(3):
                 if i <= t:
                     x0, y0 = pt(14 + i * 7, 2 + i * 8)
-                    cv.create_text(x0, y0, text='z' if i == 0 else 'Z', fill='#8aa0d0', font=('Segoe UI', 8 + i * 3, 'bold'))
+                    cv.create_text(x0, y0, text='z' if i == 0 else 'Z', fill='#8aa0d0', font=(UI_FONT, 8 + i * 3, 'bold'))
         elif main and working and self.mode != 'drag' and mood != 'dead':
             on = int(now * 3) % 3
             dots = [pt((i - 1) * 8, 10) for i in range(3)]  # just the three dots, no bubble, on every surface
@@ -1103,10 +1842,11 @@ def read_state():
             continue
         age = now_ms - j.get('updatedAt', 0)
         if age > 24 * 3600 * 1000 or j.get('closed'):
-            try:
-                os.remove(f)  # an old file, or a chat that said goodbye
-            except Exception:
-                pass
+            for old in (f, os.path.join(BASE, 'pid-' + os.path.basename(f)[6:-5])):
+                try:
+                    os.remove(old)  # an old file, or a chat that said goodbye
+                except Exception:
+                    pass
             continue
         if age > LIVE_S * 1000:
             continue  # the chat is gone (or asleep for good): no crab
@@ -1121,7 +1861,7 @@ def read_state():
             agents[str(a.get('id'))] = a.get('tier', 'other')
         sessions.append({'sid': sid, 'project': str(j.get('project') or ''), 'busy': bool(j.get('busy')), 'agents': agents,
                          'done': j.get('doneAt', 0), 'err': j.get('errorAt', 0), 'needs': bool(j.get('needs')) and bool(j.get('busy')) and NEEDS_MIN_S * 1000 <= now_ms - (j.get('needsAt') or 0) < NEEDS_MAX_S * 1000,
-                         'tool': str(j.get('tool') or ''), 'busy_since': j.get('busySince', 0) or 0})
+                         'tool': str(j.get('tool') or ''), 'last_tool': str(j.get('lastTool') or ''), 'tool_at': j.get('toolAt', 0) or 0, 'busy_since': j.get('busySince', 0) or 0})
     sessions.sort(key=lambda s: s['sid'])
     # chats idle for more than IDLE_GONE_S lose their crab; the most recently active one always keeps its crab
     for s in sessions:
@@ -1150,6 +1890,9 @@ def hue_pick(sid, used):
     return OUTFITS[base]
 
 
+PLAY_CHANCE = float(os.environ.get('CRAB_PLAY_CHANCE') or 0.5)  # how often a wave turns into a game
+
+
 def greet_pairs(live_list, now):
     """Two crabs walking past each other on the same floor stop and wave."""
     cand = [c for c in live_list if c.surf == 'floor' and c.mode in ('walk', 'pause') and c.pose is None
@@ -1163,10 +1906,20 @@ def greet_pairs(live_list, now):
                     c.pose, c.pose_until = 'greet', now + 1.4
                     c.greet_cd = now + random.uniform(30, 70)
                     c.dir = 1 if o.x > c.x else -1
+                if a.main and b.main and a.plat == b.plat and random.random() < PLAY_CHANCE:  # after the wave, sometimes a game
+                    if random.random() < 0.5:  # a race to the far end of the floor or the window top
+                        lo, hi = a.walk_range()
+                        mid = (a.x + b.x) / 2
+                        end = hi if hi - mid > mid - lo else lo
+                        first, second = (a, b) if abs(a.x - end) < abs(b.x - end) else (b, a)
+                        gap = (first.w + 6) * (1 if end == lo else -1)
+                        first.play, second.play = ('race', now + 1.6, end, second), ('race', now + 1.6, end + gap, first)
+                    else:
+                        a.play = ('hop', now + 1.6, None, b)
                 break
 
 
-EMPTY = {'sid': '', 'project': '', 'busy': False, 'agents': {}, 'done': 0, 'err': 0, 'needs': False, 'tool': '', 'busy_since': 0}
+EMPTY = {'sid': '', 'project': '', 'busy': False, 'agents': {}, 'done': 0, 'err': 0, 'needs': False, 'tool': '', 'last_tool': '', 'tool_at': 0, 'busy_since': 0}
 
 
 def main():
@@ -1178,7 +1931,13 @@ def main():
         pass
     root = tk.Tk()
     root.withdraw()
+    if MAC:
+        try:
+            mac_accessory()
+        except Exception:
+            log('mac_accessory failed: ' + traceback.format_exc())
     crabs = {}   # ('m', sid) for a session's main crab, ('a', sid, agent) for its helpers
+    leaving = []  # crabs whose chat closed, still playing their vanishing puff
     st = {'last': time.time(), 'state_t': 0.0, 'beat_t': 0.0, 's': {'sessions': [], 'usage': -1.0},
           'err_seen': {}, 'rescale': False, 'mon_t': 0.0, 'hide_until': 0.0, 'greet_t': 0.0, 'slots': {}, 'dbg_t': 0.0, 'n': 0}
 
@@ -1214,6 +1973,8 @@ def main():
 
     def set_outfit(c, o):
         if c.fx_t0 is None:
+            PREFS['outfit_keep'] = o is not None  # an outfit picked from the menu stays on; "Surprise me" lets it change again
+            save_prefs()
             c.start_fx(time.time(), o)
 
     def set_size(n):
@@ -1222,6 +1983,30 @@ def main():
         save_prefs()
         st['rescale'] = True
 
+    def set_speed(v):
+        globals()['SPEED'] = float(v)
+        PREFS['speed'] = float(v)
+        save_prefs()
+        for c in crabs.values():
+            c.speed = c.base_speed * SPEED
+
+    def set_pref(key, v):
+        """A choice from the Options menu: remember it and use it from now on."""
+        PREFS[key] = v
+        save_prefs()
+        g = globals()
+        if key == 'prop_seconds':
+            g['PROP_HOLD'] = float(v)
+        elif key == 'party_minutes':
+            g['PARTY_S'] = float(v) * 60
+        elif key == 'window_edges':
+            g['WIN_EDGES'] = bool(v)
+            WIN_CACHE['t'] = 0.0  # look again now (a crab on a window lets go when this is turned off)
+        elif key == 'pointer_play':
+            g['POINTER_PLAY'] = bool(v)
+            for c in crabs.values():
+                c.chase_until = 0.0
+
     def toggle_sleep(c):
         c.sleeping = not c.sleeping
         c.idle_since = time.time()
@@ -1229,6 +2014,9 @@ def main():
 
     def hide_for_hour():
         st['hide_until'] = time.time() + 3600
+        for c in leaving:  # tick() pauses while hidden, so a puff in progress would hang there
+            c.destroy()
+        leaving.clear()
         for c in crabs.values():
             c.hide_tip()
             try:
@@ -1248,7 +2036,7 @@ def main():
                 pass
         st['state_t'] = 0.0
 
-    APP.update({'outfit': set_outfit, 'size': set_size, 'sleep': toggle_sleep, 'quit': stop, 'used': used_by_others,
+    APP.update({'outfit': set_outfit, 'size': set_size, 'speed': set_speed, 'pref': set_pref, 'sleep': toggle_sleep, 'quit': stop, 'used': used_by_others,
                 'hide': hide_for_hour, 'usage': lambda: (st['s']['usage'], st['s'].get('resets', 0))})
     beat()
 
@@ -1278,15 +2066,20 @@ def main():
         for key in list(crabs):
             c = crabs[key]
             if c.sid not in live or (key[0] == 'a' and key[2] not in live[c.sid]['agents']):
-                c.destroy()
                 del crabs[key]
+                if st['hide_until'] or c.mode == 'drag':
+                    c.destroy()
+                else:
+                    c.vanish(now)  # a puff of smoke, then gone (tick() destroys it when the puff ends)
+                    leaving.append(c)
         for x in sess:
             sid = x['sid']
             if ('m', sid) not in crabs:
-                make_main(sid, slots[sid], mons2)
+                make_main(sid, slots[sid], mons2).appear(now)  # steps out of a puff of smoke
             for aid, tier in x['agents'].items():
                 if ('a', sid, aid) not in crabs and len(crabs) < 16:
                     crabs[('a', sid, aid)] = Crab(root, aid, tier, False, mons2, sid=sid)
+                    crabs[('a', sid, aid)].appear(now)
         multi = len(sess) >= 2
         seen, labels = {}, {}
         for x in sorted(sess, key=lambda v: slots[v['sid']]):
@@ -1307,7 +2100,16 @@ def main():
             if c.main:
                 c.slot = slots[c.sid]
                 c.label = labels[c.sid]
-                c.mood, c.tool, c.needs = mood, x['tool'], x['needs']
+                c.mood, c.needs = mood, x['needs']
+                c.app_pids = app_pids(c.sid, now)
+                # the prop in hand stays up at least PROP_HOLD seconds; a tool too quick to catch still gets its turn afterwards
+                want, at = x['tool'], x['tool_at']
+                if not want and at > c.tool_seen and now * 1000 - at < 10000:
+                    want = x['last_tool']
+                if want != c.tool and (not c.tool or now - c.tool_t0 >= PROP_HOLD):
+                    c.tool, c.tool_t0 = want, now
+                if c.tool and c.tool == want:
+                    c.tool_seen = max(c.tool_seen, at)
                 c.exhausted = u >= 90
                 c.busy_since = x['busy_since'] if x['busy'] else 0
                 c.info = {'tool': x['tool'], 'busy': x['busy'], 'agents': len(x['agents']), 'needs': x['needs']}
@@ -1320,8 +2122,9 @@ def main():
     def rebuild():
         """Size changed: make every crab again at the new size."""
         saved = [(c.sid, c.slot, c.tier, c.x, c.y, c.w, c.h) for c in mains()]
-        for c in crabs.values():
+        for c in list(crabs.values()) + leaving:
             c.destroy()
+        leaving.clear()
         crabs.clear()
         mons2 = get_monitors()
         for sid, slot, tier, x, y, w, h in saved:
@@ -1368,6 +2171,13 @@ def main():
                 st['s'] = read_state()
                 reconcile(get_monitors(), now)
             live_list = list(crabs.values())
+            if MAC:
+                for c in live_list:
+                    if c.mode == 'drag':
+                        try:
+                            c.mac_drag_poll()
+                        except Exception:
+                            log(traceback.format_exc())
             if len(live_list) > 1 and now - st['greet_t'] > 0.25:
                 st['greet_t'] = now
                 greet_pairs(live_list, now)  # two crabs meet: they wave at each other
@@ -1381,16 +2191,41 @@ def main():
                 if c.main:
                     working = x['busy'] or len(x['agents']) > 0
                     hearts = (not working) and x['done'] > 0 and (now_ms - x['done'] < 4000)
+                    if x['busy'] and x['busy_since']:
+                        c.turn_t0 = x['busy_since']
+                    elif hearts and c.turn_t0 and PARTY_S > 0:
+                        if x['done'] - c.turn_t0 < PARTY_S * 1000:
+                            c.turn_t0 = 0
+                        else:  # a long turn: confetti and a happy hop (tried again while the hearts last, if it is busy waving)
+                            if c.pose == 'greet':
+                                c.pose = None
+                            if c.start_pose('joy', now, 5.0):
+                                if DEBUG:
+                                    log('party %s' % c.sid[:6])
+                                c.party_until, c.turn_t0 = now + 5.0, 0
+                    elif not hearts:
+                        c.turn_t0 = 0
                 else:
                     working, hearts = True, False
                 any_working = any_working or (working and c.main)
                 any_hearts = any_hearts or hearts
                 if c.update(dt, now, working, hearts):
                     fast = True
+            for c in list(leaving):
+                try:
+                    done = c.vanish_tick(now)
+                except Exception:
+                    log(traceback.format_exc())
+                    done = True
+                if done:
+                    c.destroy()
+                    leaving.remove(c)
+                else:
+                    fast = True
             ms = [c for c in live_list if c.main]
             if DEBUG and now - st['dbg_t'] > 2:
                 st['dbg_t'] = now
-                log('crabs=%d mains=%s' % (len(crabs), [(c.sid[:6], c.tier, c.mode, c.pose, c.label) for c in ms]))
+                log('crabs=%d mains=%s' % (len(crabs), [(c.sid[:6], c.tier, c.mode, c.pose, c.label, c.surf, int(c.x), int(c.y), int(c.tx), int(c.ty), c.plat, c.climb) for c in ms]))
             if any(c.mode in ('drag', 'fall', 'jump') for c in live_list):
                 delay = 16
             elif fast or any_hearts:
