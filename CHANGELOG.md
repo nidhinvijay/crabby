@@ -2,6 +2,11 @@
 
 Changes in this fork (CarlRodabaugh/crabby), newest first.
 
+## 2026-11-27
+
+- **New (macOS, off by default): run from the pointer.** Turn on *Run from the pointer* in Options and a roaming crab always scuttles away when the pointer gets close. Hold ⌥ Option to grab or click it. It stays macOS-only because Option-to-grab is the only way to catch it.
+- **New (macOS, off by default): get out of the way when I type.** Turn on *Get out of the way when I type* in Options and a crab sitting on the text box you're typing in moves aside, or fades out if there's no room. It finds the text cursor through macOS Accessibility, so the first use asks for that permission.
+
 ## 2026-11-19
 
 - **Fixed (macOS): new crabs no longer steal keyboard focus.** Tk asks macOS to activate the app every time it shows a window, so a crab spawning for a new chat (or a hover card opening) pulled focus away from whatever you were typing in. The pet now lets that activation through only while a mouse button is held: clicking, dragging and right-click menus work as before, and a crab that simply appears leaves your focus alone.

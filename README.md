@@ -66,6 +66,7 @@ Then start a **new** Claude chat. The crab shows up by itself and goes away when
 | `"prop_seconds"` in the pet folder's `settings.json` | how long the magnifier, hammer or terminal stays up at least (default `3`, `0` turns the hold off). Stop the pet before editing the file, then start it again. The `CRAB_PROP_SECONDS` environment variable overrides it. |
 | `"party_minutes"` in the same `settings.json` | how long a turn must be for confetti (default `10`, `0` turns it off) |
 | `"pointer_play": false` in the same `settings.json` | no chasing or running from the pointer |
+| `"pointer_flee": true` / `"typing_dodge": true` (macOS, both off by default, also in Options) | always run from the pointer (hold ⌥ to grab) / move off the text box you're typing in (needs Accessibility permission) |
 | `"speed"` in the same `settings.json` | how lively the crab is (default `1`; `0.5` walks half as fast, pauses twice as long, and hops, climbs and does tricks half as often; `0.1` to `3`). The right-click menu's "Change speed" sets it on the spot; to type your own number, stop the pet before editing the file, then start it again. The `CRAB_SPEED` environment variable overrides it. |
 
 ## How it works

@@ -105,6 +105,8 @@ def _speed():
 SPEED = _speed()
 SPEEDS = ((0.2, 'Very slow'), (0.33, 'Slow'), (0.5, 'Relaxed'), (1.0, 'Normal'), (1.5, 'Fast'), (2.5, 'Hyper'))  # the menu's choices
 POINTER_PLAY = PREFS.get('pointer_play', True) is not False  # now and then it follows the pointer, or runs from it
+POINTER_FLEE = MAC and PREFS.get('pointer_flee', False) is True  # off by default; scuttles away when the pointer comes close (hold Option to grab it, so macOS only)
+TYPE_DODGE = MAC and PREFS.get('typing_dodge', False) is True  # off by default (needs Accessibility); gets off the text box you are typing in, or fades out if it cannot
 
 
 def _party_s():
@@ -358,6 +360,137 @@ if MAC:
         finally:
             _cf.CFRelease(arr)
         return out
+
+
+    _cg.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
+    _cg.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_int, ctypes.c_uint32]
+
+    def mac_since_key():
+        """Seconds since the last key press anywhere (no Input Monitoring permission needed)."""
+        return _cg.CGEventSourceSecondsSinceLastEventType(1, 10)  # combined session state, kCGEventKeyDown
+
+    def mac_option_down():
+        """Option held: the crab lets the pointer come close, so you can grab it."""
+        return bool(_msg(_objc.objc_getClass(b'NSEvent'), b'modifierFlags', restype=ctypes.c_ulong) & 0x80000)
+
+    def mac_front_pid():
+        ws = _msg(_objc.objc_getClass(b'NSWorkspace'), b'sharedWorkspace')
+        app = _msg(ws, b'frontmostApplication')
+        return _msg(app, b'processIdentifier', restype=ctypes.c_int) if app else 0
+
+    _AX = {'manual': set()}
+
+    def _ax_init():
+        if 'lib' in _AX:
+            return _AX['lib']
+        try:
+            ax = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
+            ax.AXIsProcessTrusted.restype = ctypes.c_bool
+            ax.AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+            ax.AXIsProcessTrustedWithOptions.argtypes = [_V]
+            ax.AXUIElementCreateSystemWide.restype = _V
+            ax.AXUIElementCreateApplication.restype = _V
+            ax.AXUIElementCreateApplication.argtypes = [ctypes.c_int]
+            ax.AXUIElementCopyAttributeValue.argtypes = [_V, _V, ctypes.POINTER(_V)]
+            ax.AXUIElementCopyAttributeValue.restype = ctypes.c_int32
+            ax.AXUIElementCopyParameterizedAttributeValue.argtypes = [_V, _V, _V, ctypes.POINTER(_V)]
+            ax.AXUIElementCopyParameterizedAttributeValue.restype = ctypes.c_int32
+            ax.AXUIElementSetAttributeValue.argtypes = [_V, _V, _V]
+            ax.AXUIElementSetAttributeValue.restype = ctypes.c_int32
+            ax.AXUIElementSetMessagingTimeout.argtypes = [_V, ctypes.c_float]
+            ax.AXValueGetValue.argtypes = [_V, ctypes.c_int, _V]
+            ax.AXValueGetValue.restype = ctypes.c_bool
+            _AX['sys'] = ax.AXUIElementCreateSystemWide()
+            ax.AXUIElementSetMessagingTimeout(_AX['sys'], 0.15)  # a hung app must not freeze the crab
+            for k in ('AXFocusedUIElement', 'AXPosition', 'AXSize', 'AXSelectedTextRange', 'AXBoundsForRange', 'AXManualAccessibility', 'AXTrustedCheckOptionPrompt'):
+                _AX[k] = _cf.CFStringCreateWithCString(None, k.encode(), 0x08000100)
+            _AX['true'] = _V.in_dll(_cf, 'kCFBooleanTrue').value
+            _AX['lib'] = ax
+            # ask once for Accessibility, so the crab can see where you type (macOS shows its own prompt)
+            _cf.CFDictionaryCreate.restype = _V
+            _cf.CFDictionaryCreate.argtypes = [_V, ctypes.POINTER(_V), ctypes.POINTER(_V), ctypes.c_long, _V, _V]
+            keys, vals = (_V * 1)(_AX['AXTrustedCheckOptionPrompt']), (_V * 1)(_AX['true'])
+            d = _cf.CFDictionaryCreate(None, keys, vals, 1, None, None)
+            ax.AXIsProcessTrustedWithOptions(d)
+        except Exception:
+            _AX['lib'] = None
+        return _AX['lib']
+
+    def _ax_rect(val, kind):
+        """An AXValue CGPoint (1), CGSize (2) or CGRect (3) as a tuple of doubles."""
+        n = 4 if kind == 3 else 2
+        buf = (ctypes.c_double * n)()
+        return tuple(buf) if _AX['lib'].AXValueGetValue(val, kind, ctypes.cast(buf, _V)) else None
+
+    def mac_focus_rect(pid=0):
+        """Where you type: the text cursor's box, else the focused field's frame. Needs Accessibility; None without it."""
+        ax = _ax_init()
+        if ax is None or not ax.AXIsProcessTrusted():
+            return None
+        if pid and pid not in _AX['manual']:  # Electron/Chromium apps only build their accessibility tree when asked
+            _AX['manual'].add(pid)
+            app = ax.AXUIElementCreateApplication(pid)
+            if app:
+                ax.AXUIElementSetAttributeValue(app, _AX['AXManualAccessibility'], _AX['true'])
+                _cf.CFRelease(app)
+        el = _V()
+        if ax.AXUIElementCopyAttributeValue(_AX['sys'], _AX['AXFocusedUIElement'], ctypes.byref(el)) != 0 or not el.value:
+            return None
+        held = [el]
+        try:
+            rng, bnd = _V(), _V()
+            if ax.AXUIElementCopyAttributeValue(el, _AX['AXSelectedTextRange'], ctypes.byref(rng)) == 0 and rng.value:
+                held.append(rng)
+                if ax.AXUIElementCopyParameterizedAttributeValue(el, _AX['AXBoundsForRange'], rng, ctypes.byref(bnd)) == 0 and bnd.value:
+                    held.append(bnd)
+                    r = _ax_rect(bnd, 3)
+                    if r and r[3] > 0 and (r[0] or r[1]):
+                        return (int(r[0]), int(r[1]), int(r[0] + max(r[2], 2)), int(r[1] + r[3]))
+            pv, sv = _V(), _V()
+            if ax.AXUIElementCopyAttributeValue(el, _AX['AXPosition'], ctypes.byref(pv)) != 0 or not pv.value:
+                return None
+            held.append(pv)
+            if ax.AXUIElementCopyAttributeValue(el, _AX['AXSize'], ctypes.byref(sv)) != 0 or not sv.value:
+                return None
+            held.append(sv)
+            pt, sz = _ax_rect(pv, 1), _ax_rect(sv, 2)
+            if not pt or not sz or sz[0] < 20 or sz[1] < 10:
+                return None
+            return (int(pt[0]), int(pt[1]), int(pt[0] + sz[0]), int(pt[1] + sz[1]))
+        finally:
+            for h in held:
+                _cf.CFRelease(h)
+
+
+TYPE_HOLD_S = 3.0   # typing counts this long after the last key press
+FLEE_R = 130        # pointer distance (at medium size) that sends the crab scuttling off
+TYPE_CACHE = {'t': -1.0, 'zone': (False, None, False)}
+
+
+def typing_spot(now):
+    """While you type: (True, (x, y), exact). exact=True is the text cursor (Accessibility); otherwise a guess:
+    the bottom middle of the window you type in, where chat apps keep the text box. (False, None, False) when not typing."""
+    if not (MAC and TYPE_DODGE):
+        return False, None, False
+    if 0 <= now - TYPE_CACHE['t'] < 0.2:
+        return TYPE_CACHE['zone']
+    res = (False, None, False)
+    try:
+        if mac_since_key() < TYPE_HOLD_S:
+            pid = mac_front_pid()
+            r = mac_focus_rect(pid)
+            if r:
+                res = (True, ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2), True)
+            else:
+                wins = get_windows(now) if WIN_EDGES else mac_windows()
+                for wid, l, t, rr, b in wins:
+                    if WIN_PID.get(wid) == pid:
+                        res = (True, ((l + rr) / 2, b - 60), False)
+                        break
+    except Exception:
+        res = (False, None, False)
+    TYPE_CACHE['t'], TYPE_CACHE['zone'] = now, res
+    return res
 
 
 WIN_PID = {}   # window id -> the process that owns it
@@ -676,6 +809,7 @@ class Crab:
         self.app_pids = ()                 # processes of the chat's own app, to know its window
         self.ptr, self.ptr_t, self.ptr_near, self.flee_cd = (0, 0), 0.0, False, 0.0
         self.dash_until, self.dash_k, self.chase_until = 0.0, 2.0, 0.0
+        self.flee_t, self.faded, self.type_fled = 0.0, False, False
         self.play, self.racing = None, None  # a game planned with another crab; the crab it is racing
         self.turn_t0, self.party_until = 0, 0.0
         self.sid, self.slot, self.label = sid, slot, ''
@@ -956,6 +1090,74 @@ class Crab:
                     log('flee %s to %d' % (self.sid[:6], tx))
         self.ptr_near = near
 
+    def set_faded(self, on):
+        """See-through while it sits on the text you are typing and has nowhere to go."""
+        if on != self.faded:
+            self.faded = on
+            try:
+                self.win.attributes('-alpha', 0.12 if on else 1.0)
+            except Exception:
+                pass
+
+    def dodge(self, now, roaming):
+        """Keep out of the way: scuttle off from the pointer, and from where you type (the text field with
+        Accessibility permission, else the pointer). A resting or sleeping crab fades out instead of walking,
+        so it does not keep walking back to bed."""
+        typing, spot, exact = typing_spot(now)
+        if now - self.ptr_t > 0.05:
+            self.ptr_t, self.ptr = now, self.win.winfo_pointerxy()
+        cx, cy = self.x + self.w / 2, self.y + self.h / 2
+        R = FLEE_R * self.scale / 3
+        if typing and spot is not None:
+            px, py = spot
+            if exact:  # the text cursor: run whenever it is close
+                close = math.hypot(px - cx, py - cy) < R
+            else:  # a guess: only when it sits low in the window you type in, and run just once per burst of typing
+                close = abs(py - cy) < 120 * self.scale / 3 and not self.type_fled
+            if close and roaming and now >= self.flee_t:
+                self.set_faded(False)
+                self.type_fled = True
+                self.flee_from(px, py, now)
+                return
+            self.set_faded(close and exact and not roaming)
+            if close:
+                return
+        else:
+            self.type_fled = False
+            self.set_faded(False)
+        if not (POINTER_FLEE and roaming and now >= self.flee_t and now >= self.chase_until and self.racing is None):
+            return
+        px, py = self.ptr
+        if abs(px - cx) < self.w / 2 and abs(py - cy) < self.h / 2:
+            return  # the pointer is on it already: it wants a pet
+        if math.hypot(px - cx, py - cy) > R or (MAC and mac_option_down()):
+            return
+        self.flee_from(px, py, now)
+
+    def flee_from(self, px, py, now):
+        """Dash a few hundred pixels away from a point; cornered, it darts past it instead."""
+        k = self.scale / 3
+        cx, cy = self.x + self.w / 2, self.y + self.h / 2
+        if self.surf == 'floor':
+            if self.wclimb is not None or isinstance(self.climb, tuple):
+                return
+            lo, hi = self.walk_range()
+            d = 1 if cx >= px else -1
+            tx = min(max(self.x + d * random.uniform(200, 340) * k, lo), hi)
+            if abs(tx - self.x) < 50 * k:
+                tx = min(max(self.x - d * random.uniform(260, 400) * k, lo), hi)
+            self.tx, self.ty, self.mode, self.climb = tx, float(self.floor_y()), 'walk', None
+        elif self.surf in ('left', 'right'):
+            l, t, r, b = self.bounds
+            low = b - BOTTOM_MARGIN - self.h + PAD
+            d = 1 if cy >= py else -1
+            self.tx, self.ty, self.mode = self.x, min(max(self.y + d * random.uniform(200, 320) * k, t), low), 'walk'
+        else:
+            return
+        self.dash_until, self.dash_k, self.flee_t = now + 1.2, 2.6, now + 0.35
+        if DEBUG:
+            log('flee %s to %d,%d' % (self.sid[:6], self.tx, self.ty))
+
     def start_play(self, now):
         """The game it agreed on with another crab after waving: a race, or a hop over the other one."""
         kind, at, a, b = self.play
@@ -1205,6 +1407,9 @@ class Crab:
         if MAC:  # window climbing is macOS only for now
             xm.add_command(label=('✓ ' if WIN_EDGES else '    ') + 'Climb app windows', command=lambda: APP['pref']('window_edges', not WIN_EDGES))
         xm.add_command(label=('✓ ' if POINTER_PLAY else '    ') + 'Play with the pointer', command=lambda: APP['pref']('pointer_play', not POINTER_PLAY))
+        if MAC:
+            xm.add_command(label=('✓ ' if POINTER_FLEE else '    ') + 'Run from the pointer (hold ⌥ to grab)', command=lambda: APP['pref']('pointer_flee', not POINTER_FLEE))
+            xm.add_command(label=('✓ ' if TYPE_DODGE else '    ') + 'Get out of the way when I type', command=lambda: APP['pref']('typing_dodge', not TYPE_DODGE))
         m.add_cascade(label='Options', menu=xm)
         m.add_command(label='Wake up' if self.sleeping else 'Put to sleep', command=lambda: APP['sleep'](self))
         m.add_command(label='Hide for 1 hour', command=APP['hide'])
@@ -1503,6 +1708,7 @@ class Crab:
             if (roaming and main and POINTER_PLAY and self.surf == 'floor' and self.mode in ('walk', 'pause')
                     and not self.plat_leave and not isinstance(self.climb, tuple) and mood != 'dead'):
                 self.pointer_play(now)
+            self.dodge(now, roaming and mood != 'dead' and not self.plat_leave)
             if self.mode == 'walk':
                 dx, dy = self.tx - self.x, self.ty - self.y
                 dist = (dx * dx + dy * dy) ** 0.5
@@ -2006,6 +2212,13 @@ def main():
             g['POINTER_PLAY'] = bool(v)
             for c in crabs.values():
                 c.chase_until = 0.0
+        elif key == 'pointer_flee':
+            g['POINTER_FLEE'] = bool(v)
+        elif key == 'typing_dodge':
+            g['TYPE_DODGE'] = bool(v)
+            TYPE_CACHE['t'] = -1.0
+            for c in crabs.values():
+                c.set_faded(False)
 
     def toggle_sleep(c):
         c.sleeping = not c.sleeping
