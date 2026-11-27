@@ -1087,6 +1087,7 @@ class Crab:
 IDLE_GONE_S = 60           # an idle chat's crab goes away after this long (the newest chat always keeps one)
 SEEN_AT = {}
 NEEDS_MAX_S = 60           # "needs you" only counts this long after Claude asked (it cannot see you answer, so it must not wave for ever)
+NEEDS_MIN_S = 5            # ...and only once it has waited this long (an automatic approval takes a moment)
 LIVE_S = 180              # a session is "live" while its state file was updated this recently (the mod writes every minute)
 
 
@@ -1119,7 +1120,7 @@ def read_state():
         for a in j.get('agents', []):
             agents[str(a.get('id'))] = a.get('tier', 'other')
         sessions.append({'sid': sid, 'project': str(j.get('project') or ''), 'busy': bool(j.get('busy')), 'agents': agents,
-                         'done': j.get('doneAt', 0), 'err': j.get('errorAt', 0), 'needs': bool(j.get('needs')) and bool(j.get('busy')) and now_ms - (j.get('needsAt') or 0) < NEEDS_MAX_S * 1000,
+                         'done': j.get('doneAt', 0), 'err': j.get('errorAt', 0), 'needs': bool(j.get('needs')) and bool(j.get('busy')) and NEEDS_MIN_S * 1000 <= now_ms - (j.get('needsAt') or 0) < NEEDS_MAX_S * 1000,
                          'tool': str(j.get('tool') or ''), 'busy_since': j.get('busySince', 0) or 0})
     sessions.sort(key=lambda s: s['sid'])
     # chats idle for more than IDLE_GONE_S lose their crab; the most recently active one always keeps its crab

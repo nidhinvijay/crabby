@@ -195,6 +195,16 @@ export const register: Register = (on, options) => {
     return v
   })
 
+  // The call was allowed (by the person, or automatically) and is about to run: nobody is waiting any more.
+  // A question or a plan approval stays "waiting" until its tool.call ends.
+  on('tool.run', async ($, e, next) => {
+    if (!e.agentId && extra.needs && e.tool !== 'AskUserQuestion' && e.tool !== 'ExitPlanMode') {
+      extra.needs = false
+      await writePet($)
+    }
+    return next(e)
+  })
+
   // Plan usage (five-hour window), for the pet's tired mood.
   on('session.measure', async ($, e, next) => {
     const w = e.rateLimits.find(r => r.kind === 'five_hour')
